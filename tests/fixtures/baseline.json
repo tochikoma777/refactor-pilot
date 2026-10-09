@@ -1,0 +1,197 @@
+{
+  "baseline_version": "1",
+  "target_ref": "HEAD",
+  "target_note": "源项目 v1 仓库（my-LLM-from-scratch）。该仓库从未被改造过，v2 是完全独立的新仓库，因此直接审计当前 HEAD 即可，无需 --ref。",
+  "source": "源项目启动时的人工全量审计（R1），共 2525 行 / 6 个模块",
+
+  "_match_rule_note": "匹配按 rule_id + file + 证据文本，不按 line（机械阶段跑完 line 必然位移）。detectable_by 为空数组 = 本工具不覆盖，预期不被发现。",
+
+  "_confidence_note": "file/line 列中标注 (需核对) 的项，是审计时记录的模块缩写（如 TRAIN:215），实际相对路径请以仓库扫描结果为准。这些项的 baseline_confidence 已相应降低。",
+
+  "items": [
+    {
+      "id": "K-01",
+      "class": "engineering",
+      "severity": "blocker",
+      "file": "tests/",
+      "line": null,
+      "desc": "零测试文件，全仓库无任何测试",
+      "detectable_by": ["B01"],
+      "baseline_confidence": "high"
+    },
+    {
+      "id": "K-02",
+      "class": "engineering",
+      "severity": "blocker",
+      "file": "pyproject.toml",
+      "line": null,
+      "desc": "无任何依赖/打包声明（pyproject / setup.py / requirements 全缺）",
+      "detectable_by": ["C01"],
+      "baseline_confidence": "high"
+    },
+    {
+      "id": "K-03",
+      "class": "engineering",
+      "severity": "major",
+      "file": "(无 lint 配置文件)",
+      "line": null,
+      "desc": "无 lint 配置（ruff/flake8/pylint 全无）",
+      "detectable_by": ["C02"],
+      "baseline_confidence": "high"
+    },
+    {
+      "id": "K-04",
+      "class": "engineering",
+      "severity": "minor",
+      "file": ".github/workflows/",
+      "line": null,
+      "desc": "无 CI 配置",
+      "detectable_by": ["C06"],
+      "baseline_confidence": "high"
+    },
+    {
+      "id": "K-05",
+      "class": "engineering",
+      "severity": "minor",
+      "file": "CODEBUDDY.md / AGENTS.md / CLAUDE.md",
+      "line": null,
+      "desc": "无 AI 约束文件（工具会创建）",
+      "detectable_by": ["C04"],
+      "baseline_confidence": "high"
+    },
+    {
+      "id": "K-06",
+      "class": "engineering",
+      "severity": "major",
+      "file": "src/modules/module_train.py (需核对)",
+      "line": 349,
+      "desc": "库函数里遍布 print() 而非日志（TRAIN:349、SFT:117-121 等）",
+      "detectable_by": [],
+      "baseline_confidence": "medium",
+      "_note": "规则包 E 组未实现此条（原则 1：lint 能覆盖的不重复实现）。预期漏报，属已知缺口。"
+    },
+    {
+      "id": "K-07",
+      "class": "engineering",
+      "severity": "major",
+      "file": "src/modules/module_fine_tuning.py (需核对)",
+      "line": 446,
+      "desc": "指令微调写死 gpt2-medium (355M) 且必须联网下载，模型尺寸不可配置",
+      "detectable_by": [],
+      "baseline_confidence": "medium",
+      "_note": "属于'硬编码配置'类，规则包 F 组无对应 P0 条目。预期漏报。"
+    },
+    {
+      "id": "K-08",
+      "class": "engineering",
+      "severity": "minor",
+      "file": "(无 Makefile / [tool.*] scripts)",
+      "line": null,
+      "desc": "无统一任务入口，运行方式散落在文档各处",
+      "detectable_by": ["C07"],
+      "baseline_confidence": "medium",
+      "_note": "C07 为 P2，首版未实现。预期漏报（首版范围内属正常）。"
+    },
+    {
+      "id": "K-09",
+      "class": "config",
+      "severity": "major",
+      "file": "src/ (多处，需核对)",
+      "line": null,
+      "desc": "三处 GPT_CONFIG_124M 字面量互相矛盾：context_length 一处 256、一处 1024，drop_rate/qkv_bias 亦不一致",
+      "detectable_by": ["F05"],
+      "baseline_confidence": "high",
+      "_note": "F05 为 P2 且置信度 M（启发式）。若漏报属预期；若命中则为加分项。"
+    },
+    {
+      "id": "K-10",
+      "class": "semantic",
+      "severity": "blocker",
+      "file": "src/modules/module_load_gpt2.py (需核对)",
+      "line": null,
+      "desc": "weight tying 被打断：assign() 返回新 nn.Parameter 让调用方整体替换属性，加载后 out_head 与 tok_emb 成为两个独立张量，微调时各自漂移",
+      "detectable_by": [],
+      "baseline_confidence": "high",
+      "_note": "★ 本类问题的典型代表。静态规则无法判定'共享引用是否被静默断开'，唯一手段是与参考实现对拍。"
+    },
+    {
+      "id": "K-11",
+      "class": "semantic",
+      "severity": "blocker",
+      "file": "src/language_module.py (需核对)",
+      "line": null,
+      "desc": "掩码 buffer 被 register_buffer 持久化进 state_dict（默认 persistent=True），换 context_length 后 load_state_dict 崩溃",
+      "detectable_by": [],
+      "baseline_confidence": "high"
+    },
+    {
+      "id": "K-12",
+      "class": "semantic",
+      "severity": "blocker",
+      "file": "src/ (需核对)",
+      "line": null,
+      "desc": "qkv_bias 默认值与 GPT-2 规格矛盾：从零训练用 False，导致权重加载时给 bias=None 赋值崩溃",
+      "detectable_by": [],
+      "baseline_confidence": "high"
+    },
+    {
+      "id": "K-13",
+      "class": "semantic",
+      "severity": "major",
+      "file": "src/language_module.py (需核对)",
+      "line": null,
+      "desc": "因果掩码用 -torch.inf 且填在缩放之前的分数上（应为 finfo(dtype).min 且填在缩放之后）",
+      "detectable_by": [],
+      "baseline_confidence": "high"
+    },
+    {
+      "id": "K-14",
+      "class": "semantic",
+      "severity": "major",
+      "file": "src/modules/module_train.py (需核对)",
+      "line": 215,
+      "desc": "evaluate_model 结尾无条件 model.train()，把 eval 模式的调用方悄悄切回 train、dropout 重开",
+      "detectable_by": [],
+      "baseline_confidence": "high"
+    },
+    {
+      "id": "K-15",
+      "class": "semantic",
+      "severity": "minor",
+      "file": "src/modules/module_train.py (需核对)",
+      "line": null,
+      "desc": "global_step 用 -1 起步让首个微批次触发基线评估，导致计数比实际批次数少 1，续训时极易算错",
+      "detectable_by": [],
+      "baseline_confidence": "high"
+    },
+    {
+      "id": "K-16",
+      "class": "semantic",
+      "severity": "major",
+      "file": "src/modules/module_fine_tuning.py (需核对)",
+      "line": null,
+      "desc": "collate 的 device 不一致（:371-375 构造时用一处、:421 使用另一处），且用 partial 预绑定 device",
+      "detectable_by": [],
+      "baseline_confidence": "medium"
+    },
+    {
+      "id": "K-17",
+      "class": "semantic",
+      "severity": "major",
+      "file": "src/modules/module_load_gpt2.py (需核对)",
+      "line": 438,
+      "desc": "生成用 idx_next.item()，隐含 batch 只能为 1，不支持批量生成",
+      "detectable_by": [],
+      "baseline_confidence": "medium"
+    }
+  ],
+
+  "_summary": {
+    "total": 17,
+    "engineering": 8,
+    "config": 1,
+    "semantic": 8,
+    "expected_recall_engineering": "应较高（K-01..K-05 是可静态可证的工程化缺失）",
+    "expected_recall_semantic": "预期接近 0 —— 这是设计使然，不是 bug。关键是这个 0 要被如实标注，不能混进总分。"
+  }
+}
