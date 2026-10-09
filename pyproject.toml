@@ -30,3 +30,8 @@ select = ["E", "F", "W", "I"]
 python_version = "3.10"
 files = ["src"]
 strict = false
+
+# tomllib / tomli 二选一兜底（12.0）：目标版本标 3.10，两个名字都可能查不到 stub
+[[tool.mypy.overrides]]
+module = ["tomllib", "tomli"]
+ignore_missing_imports = true

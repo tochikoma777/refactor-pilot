@@ -514,6 +514,18 @@ grep -n "RP:CONSTRAINT:" {{project.constraints_file}} | wc -l
 | G04  | **`.gitignore` 单行含空格分隔多 pattern（不生效）** | M/H       | 行内空格检测                   | P0   |
 | G05  | `.gitignore` 缺失或未忽略常见产物                   | m/H       | pattern 比对                   | P0   |
 | G06  | 无 remote / 存在未 push 提交                        | m/H       | `git rev-parse` / `status -sb` | P1   |
+| G07  | **仓库中跟踪了本该忽略的产物文件**（`__pycache__/` `.venv/` `*.pyc` …） | M/H | `git ls-files` × 产物 pattern 比对 | P0 |
+
+> **G07 的产物 pattern**：`__pycache__/`、`*.py[cod]`、`.venv/`、`venv/`、`.mypy_cache/`、
+> `.ruff_cache/`、`.pytest_cache/`、`.tox/`、`*.egg-info/`、`build/`、`dist/`。
+>
+> **为什么必须做成规则**：`.gitignore` 是事后补丁 —— 前提是"记得先写"。
+> 典型事故就是新项目 `git init` 后直接 `git add -A`，把一堆 `.pyc` 提交了，
+> 事后才补 `.gitignore`（但已跟踪的文件不会因补规则自动消失，还得 `git rm --cached`）。
+> 这类问题靠人记住不可靠，正该由工具兜住。
+>
+> 检测口径：`git ls-files` 的结果逐条比对上述 pattern（只看已被跟踪的，
+> 未跟踪的产物文件由 G05 负责）。每条命中给出文件路径作为 `file` 证据。
 
 #### H 组 · 文档一致性（对应"改动丢了其实是文档滞后"）★特色
 
@@ -1115,6 +1127,36 @@ refactor-pilot/
 
 1. **Q6 信号会误命中**：任何名字含 `baseline/expected/golden/reference` 的 `.json/.npy/.csv` 都被算作"数值基线"信号。工具自己的 `tests/fixtures/baseline.json` 就会命中。阈值是 ≥2 个信号才建议 Q6 默认开，单条误命中影响有限，**但别把它当强信号**。
 2. **`--exec-probe on` 且无 `--ref` 时是在目标工作目录里跑被测代码**（会打印警告）。建议始终配合 `--ref`。
+
+### 12.12 两条实现阶段定死的口径（踩过坑才写下来）
+
+#### ① 仓库根的判定只能用 `git rev-parse --show-toplevel` **【必须遵守】**
+
+不要写成"逐级往上找哪个父目录有 `.git`"。
+
+**为什么**：那种写法对「目标目录**自身**就是仓库根」的情况必然漏判 ——
+`.git` 就在目标目录里，往上找反而什么也找不到。实测事故：断言
+`v1-reference` 不在 git 仓库里（`git rev-parse --show-toplevel` 返回它自己），
+于是 vcs 字段族被当成非仓库、G 组整体失效。
+
+`git rev-parse --show-toplevel` 自己会向上查找并报告**真实的**仓库根：
+自身即根返回自身，是子目录返回祖先，一个 API 覆盖两种情形。
+
+#### ② 模块名可以有多个合法写法：别名 + 重名即不解析 **【建议】**
+
+只按"仓库根相对路径"算点分名会让整类 import 被误判成不存在，所以要认两种 source root：
+
+| 情形 | 证据 | 例 |
+| ---- | ---- | -- |
+| 打包声明的 source root | `setuptools.packages.find.where` / poetry `from` | `src/acme/core.py` 也可写作 `acme.core` |
+| **入口脚本所在目录** | 文件里有 `if __name__ == "__main__"`（`python x.py` 时该目录进 `sys.path[0]`） | `src/modules/train.py` 里的 `from language_module import ...` |
+
+**重名即不解析**：两个 source root 出现同名模块时不猜是哪一个（猜错比不说更糟），
+该别名直接丢弃，目标留在 `unresolved_imports` 里等人工确认。
+
+**仍有覆盖不到的情况**：既无打包声明、又无 `__main__` 守卫的纯脚本目录
+（典型：`archives/` 下一堆随手写的探索脚本），其兄弟 import 会被标成
+`third_party`。这是刻意的保守——A04 误报比漏报更伤工具的可用性。
 
 **顺带一个便宜的自证** **【建议】**：工具自己应该有 `pyproject.toml` + lint 配置 + `tests/`。一个专门检查"别人有没有 pyproject"的工具，自己没有会很尴尬——而且自审计一遍就是现成的冒烟测试。
 

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import __version__, gitutil, model, outdir, snapshot
 from .model import EXIT_ERROR, EXIT_OK, EXIT_UNSUPPORTED, EXIT_USAGE
+from .scan import collect_all
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--exec-probe",
         choices=("on", "off"),
         default="off",
-        help="是否实跑测试/lint 命令探测（默认 off，见 12.5；第 2 步启用）",
+        help="是否实跑测试/lint 命令探测（默认 off，见 12.5）",
     )
     p_scan.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     p_scan.add_argument("-v", "--verbose", action="store_true", help="打印细节")
@@ -88,20 +89,34 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             return EXIT_UNSUPPORTED
 
     kind = args.snapshot if args.ref is not None else snapshot.WORKDIR
+    exec_probe = args.exec_probe == "on"
+    if exec_probe and args.ref is None:
+        # 12.5：实跑只在快照目录里做；没有 --ref 就是在目标工作目录里跑被测代码
+        print("WARN 未指定 --ref：实跑将在目标工作目录中进行（会执行目标代码），"
+              "建议配合 --ref（见 12.5）", file=sys.stderr)
+
     out_dir, inside_repo = outdir.resolve(target, args.out)
     if inside_repo:
         print(f"WARN 产物目录在目标仓库内：{out_dir}（默认应在仓库之外，见 9.5）", file=sys.stderr)
 
     try:
         with snapshot.create(target, args.ref, kind) as snap:
-            snapshot_root = str(snap.root)
-            payload = model.new_scan_payload(
+            meta = model.new_scan_payload(
                 path=str(target.resolve()),
                 ref=snap.ref,
                 snapshot_kind=snap.kind,
                 resolved_sha=snap.resolved_sha,
             )
-            # 字段族由 S1 填充（第 2 步）
+            families = collect_all(
+                root=snap.root,
+                source=target,  # git 事实始终取自源仓库（12.7）
+                exec_probe=exec_probe,
+            )
+            # 字段族在前、degraded / warnings 在后，与 12.9 的契约顺序一致
+            # （骨架里先占位是为了防止某天忘记填；这里让 families 的版本排在末尾）
+            for name in ("degraded", "warnings"):
+                meta.pop(name, None)
+            payload = {**meta, **families}
             written = outdir.write_json(out_dir, "scan.json", payload)
     except RuntimeError as exc:
         print(f"快照失败：{exc}", file=sys.stderr)
@@ -110,7 +125,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
-        _print_scan(payload, written, verbose=args.verbose, snapshot_root=snapshot_root)
+        _print_scan(payload, written, verbose=args.verbose)
     return EXIT_OK
 
 
@@ -124,14 +139,83 @@ def _cmd_recall(args: argparse.Namespace) -> int:
     return EXIT_ERROR
 
 
-def _print_scan(payload: dict, written: Path, *, verbose: bool, snapshot_root: str) -> None:
+def _print_scan(payload: dict, written: Path, *, verbose: bool) -> None:
+    """人读输出。与 --json **同源**：都从 payload 出，不做第二套计算（12.10）。"""
     tgt = payload["target"]
-    ref = f"{tgt['ref']} → {tgt['resolved_sha']}" if tgt["ref"] else "（工作目录）"
+    lang = payload["lang"]
+    lay = payload["layout"]
+    vcs = payload["vcs"]
+
     print("refactor-pilot · scan")
     print(f"  目标      : {tgt['path']}")
-    print(f"  快照      : {tgt['snapshot']}")
-    print(f"  引用      : {ref}")
+    _print_snapshot_line(tgt)
+    print(f"  语言      : {lang['primary'] or '未知'}，{lang['file_count']} 个文件")
+    print(f"  包根      : {', '.join(lay['package_roots']) or '（无）'}"
+          + (f"，模块 {lay['module_count']} 个" if lay["module_count"] else ""))
+    if lay["entry_points"]:
+        print(f"  入口      : {', '.join(lay['entry_points'])}")
+    if lay["config_files"]:
+        print(f"  配置文件  : {', '.join(lay['config_files'])}")
+
+    print("  toolchain :")
+    for key, entry in payload["toolchain"].items():
+        cmd = entry["cmd"] or entry["suggested"]
+        state = "已实跑" if entry["verified"] else "未验证"
+        detail = cmd or "探测不到命令"
+        extra = ""
+        if entry["verified"] and entry["collected"] is not None:
+            extra = f"，收集 {entry['collected']} 个用例"
+        print(f"    {key:<9}: {detail}  [{state}{extra}]")
+        if entry["source"]:
+            print(f"              来源 {entry['source']}")
+        if entry["passed_files"]:
+            print(f"              通过文件 {', '.join(entry['passed_files'])}")
+        if entry["degraded_reason"] and (verbose or not entry["verified"]):
+            print(f"              {entry['degraded_reason']}")
+
+    print(f"  vcs       : {'git' if vcs['has_git'] else '非 git 仓库'}"
+          + (_git_detail(vcs) if vcs["has_git"] else ""))
+    if vcs["remotes"]:
+        print(f"    remote   : {', '.join(vcs['remotes'])}")
+
+    graph = payload["import_graph"]
+    print(f"  import 图 : {graph['node_count']} 节点 / {graph['edge_count']} 内部边"
+          f" / {graph['unresolved_count']} 未解析 / {graph['cycle_count']} 个环")
+
+    signals = payload["q6_signals"]
+    advice = "建议默认开启 Q6" if signals["suggest_q6_default_on"] else "不建议默认开启"
+    print(f"  Q6 信号   : {signals['signal_count']} 个"
+          f"（阈值 {signals['threshold']}，{advice}）")
+
+    print(f"  约束文件  : {payload['constraints_file']['path'] or '无'}"
+          f"（候选 {', '.join(payload['constraints_file']['candidates'])}）")
+    print(f"  pre-commit: {'存在' if payload['hooks']['precommit_exists'] else '无'}")
+
+    candidates = payload["q2_candidates"]
+    if candidates:
+        print("  Q2 候选   :")
+        for cand in candidates:
+            mark = "✓" if cand["preselect"] else " "
+            probe = "（需先实跑）" if cand["needs_probe"] else ""
+            print(f"    [{mark}] {cand['path']}{probe}  理由：{cand['reason']}")
+
+    if payload["degraded"]:
+        print(f"  degraded  : {', '.join(payload['degraded'])}")
+    for line in payload["warnings"]:
+        print(f"  WARN      : {line}")
     print(f"  产物目录  : {written.parent}")
     print(f"  产出      : {written.name}")
-    if verbose:
-        print(f"  快照根    : {snapshot_root}")
+
+
+def _print_snapshot_line(tgt: dict) -> None:
+    if tgt["ref"]:
+        sha = (tgt["resolved_sha"] or "")[:8]
+        tail = f"（{tgt['ref']} → {sha}）"
+    else:
+        tail = "（工作目录）"
+    print(f"  快照      : {tgt['snapshot']}{tail}")
+
+
+def _git_detail(vcs: dict) -> str:
+    cleanliness = "干净" if vcs["clean"] else "有未提交改动"
+    return f"，分支 {vcs['branch']}，{cleanliness}，{vcs['rev_count']} 个提交"

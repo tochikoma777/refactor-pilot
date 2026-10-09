@@ -24,7 +24,7 @@ def new_scan_payload(
     snapshot_kind: str,
     resolved_sha: str | None,
 ) -> dict:
-    """scan.json 顶层骨架。字段族（lang/layout/toolchain/...）由 S1 填充（第 2 步）。"""
+    """scan.json 顶层骨架（字段族由 scan.collect_all 填充，见 12.9）。"""
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
