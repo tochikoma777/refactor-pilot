@@ -604,7 +604,21 @@ m(minor)   → 进 backlog，不阻断，不生成阶段
 unverified → 不计入 blocker，单列于 audit.md 末尾"需人工确认"
 ```
 
-规则可通过 `rules.yaml` 关闭/改严重度；brief 答案调整权重（Q1=工程化补课 → C/D/G 加权；Q1=架构重构 → A/I 加权；Q5=强制测试 → B 加权）。
+规则可通过 `--rules FILE`（**TOML / JSON**，不引 PyYAML，见 12.0 的零依赖约束）关闭/改严重度；brief 答案调整权重（Q1=工程化补课 → C/D/G 加权；Q1=架构重构 → A/I 加权；Q5=强制测试 → B 加权）。
+
+#### `class` 的判据 **【必须遵守】**
+
+> **缺东西 = `engineering`，值对不上 = `config`。**
+
+| 写法 | class | 例 |
+| ---- | ----- | -- |
+| 某文件/配置/测试**不存在** | `engineering` | B01 无测试、C01 无依赖声明、C02 无 lint、C04 无约束文件、C05 hook 未隔离、C06 无 CI |
+| 配置**值互相矛盾 / 写法不对** | `config` | F02 版本区间矛盾、F05 多源同键异值、G04 `.gitignore` 某行写法失效 |
+| 语义类（**不由规则产出**） | `semantic` | 仅用于基线对照与豁免声明（3.4） |
+
+⚠️ **这条不是分类癖好，是统计口径**：10.6 的「工程化召回率 = L1命中 ∩ engineering / L1总数 ∩ engineering」
+若把缺失型规则全标成 `config`，分子分母恒为 0 —— 这一列**永久失效**，
+而且不报错、测试全过、数字看着正常（实测踩过，见 process.md P-14）。
 
 ### 7.4 ⭐ 规则抑制关系（suppression edges）**【必须遵守】**
 
@@ -1265,7 +1279,7 @@ refactor-pilot/
 - [ ] **C06 已实现**（P0）
 - [ ] ABC/Protocol 的存根被豁免（A01/A02）
 - [ ] `__init__.py` 的 F401 豁免（机械阶段，5.2）
-- [ ] 规则可通过 `rules.yaml` 关闭/改严重度
+- [ ] 规则可通过 `--rules FILE`（TOML / JSON）关闭/改严重度
 
 ---
 
