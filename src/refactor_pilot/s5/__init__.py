@@ -69,6 +69,13 @@ def run(
 
     scan = _load_scan(out_dir)
     state = _load_state(out_dir, root, stage)
+    # 切到另一个阶段时清掉上一阶段的格进度，否则 current_cell 会串台
+    # （多阶段计划的 per-stage 状态留到阶段 2 的驱动循环再细化）
+    if state.get("current_stage") not in (None, stage.id):
+        for key in ("current_cell", "create_targets", "a_fingerprint", "e_expected", "e_rev_count"):
+            state.pop(key, None)
+        state["forced"] = False
+        state["current_stage"] = stage.id
     layout = scan.get("layout") or {}
     modules = layout.get("modules") or {}
     aliases = layout.get("module_aliases") or {}
@@ -380,10 +387,9 @@ def _gate_e(state: dict, root: Path) -> dict:
 
     wanted = [item["subject"] for item in expected]
     actual_subjects = facts.recent_subjects(root, len(expected))
+    pairs = list(zip(wanted, actual_subjects))
     mismatch = [
-        {"expected": want, "actual": got}
-        for want, got in zip(wanted, actual_subjects)
-        if want != got
+        {"expected": want, "actual": got} for want, got in pairs if not _subject_ok(want, got)
     ]
     if mismatch:
         return {
@@ -393,11 +399,41 @@ def _gate_e(state: dict, root: Path) -> dict:
             "dirty": dirty,
             "mismatch": mismatch,
         }
+    retyped = [
+        {"expected": want, "actual": got}
+        for want, got in pairs
+        if want != got  # 只有类型不同（scope 与描述一致）
+    ]
+    reason = f"E 格通过：{len(expected)} 条提交与工具生成的一致"
+    if retyped:
+        reason += "（其中 " + str(len(retyped)) + " 条仅 type 不同，已按人工覆盖接受）"
     return {
         "passed": True,
-        "reason": f"E 格通过：{len(expected)} 条提交与工具生成的一致",
+        "reason": reason,
         "dirty": [],
+        "retyped": retyped,
     }
+
+
+def _subject_ok(want: str, got: str) -> bool:
+    """R6 的比对口径：**逐字一致**；唯一允许的差异是开头的 **type**（含 scope 必须一致）。
+
+    理由：工具按路径推断 type，判不了语义（14.12）；E 块据此明确提示"修复类改动可自行改
+    为 fix"。既然让改，就不能反过来判它不一致。
+    """
+    if want == got:
+        return True
+    w_head, w_sep, w_tail = want.partition(":")
+    g_head, g_sep, g_tail = got.partition(":")
+    if not (w_sep and g_sep):
+        return False
+    return _scope_of(w_head) == _scope_of(g_head) and w_tail == g_tail
+
+
+def _scope_of(head: str) -> str:
+    """取 `type(scope)` 里的 `(scope)`；没有则空串。"""
+    index = head.find("(")
+    return head[index:] if index != -1 else ""
 
 
 def _under(path: str, prefix: str) -> bool:
@@ -429,7 +465,9 @@ def _context(
     scanned_cmd = entry.get("suggested") or entry.get("cmd")
     effective_cmd = test_cmd or scanned_cmd
 
-    commit_plan = _commit_plan(facts.worktree_dirty_paths(root), stage)
+    commit_plan = _commit_plan(
+        facts.worktree_dirty_paths(root), stage, facts.tracked_paths(root)
+    )
     return {
         "project": {
             "name": root.name,
@@ -464,16 +502,17 @@ def _context(
     }
 
 
-def _commit_plan(changed: list[str], stage: Stage) -> list[dict]:
+def _commit_plan(changed: list[str], stage: Stage, tracked: set[str]) -> list[dict]:
     """按路径分类 commit_type，逐条生成 `git add <path>`（R5）。
 
     ⚠️ 简化（如实标注）：分类只看路径，不看改动语义 —— 语义分类是 S4 的活。
+    **创建类**（不在 git 跟踪里）走 D-06 的表；**修改类**沿用旧的前缀规则。
     """
     if not changed:
         return []
     groups: dict[str, list[str]] = {}
     for path in sorted(changed):
-        groups.setdefault(_commit_type(path), []).append(path)
+        groups.setdefault(_commit_type(path, created=path not in tracked), []).append(path)
 
     plan: list[dict] = []
     for index, (commit_type, paths) in enumerate(sorted(groups.items()), start=1):
@@ -498,9 +537,13 @@ def _test_cmd_is_suggested(scan: dict, test_cmd: str | None) -> bool:
     return test_cmd != entry.get("cmd") and test_cmd == entry.get("suggested")
 
 
-def _commit_type(path: str) -> str:
-    """D-06 的 commit_type 推断表（按路径，不看改动语义）。
+CONFIG_SUFFIXES = (".toml", ".cfg", ".ini", ".yml", ".yaml")
 
+
+def _commit_type(path: str, *, created: bool) -> str:
+    """路径 → commit_type。**创建类**走 D-06 的表；**修改类**走旧前缀规则。
+
+    创建类（D-06，`design-v2.md` 14.12）：
     | 路径 | type |
     | ---- | ---- |
     | `pyproject.toml` / `requirements*.txt` | `build` |
@@ -508,7 +551,16 @@ def _commit_type(path: str) -> str:
     | `.gitignore` / `.pre-commit-config*` | `chore` |
     | `test_*.py` | `test` |
     | 其它 | `chore` |
+
+    修改类（沿用旧前缀规则，目的是"改源码"不该落成 `chore`）：
+    `docs/`→`docs`、`tests/` 或 `test_*.py`→`test`、配置文件→`chore`、其它→`feat`。
     """
+    if created:
+        return _created_type(path)
+    return _modified_type(path)
+
+
+def _created_type(path: str) -> str:
     name = Path(path).name
     if name == "pyproject.toml" or (name.startswith("requirements") and name.endswith(".txt")):
         return "build"
@@ -519,6 +571,17 @@ def _commit_type(path: str) -> str:
     if name.startswith("test_"):
         return "test"
     return "chore"
+
+
+def _modified_type(path: str) -> str:
+    name = Path(path).name
+    if path.startswith("docs/"):
+        return "docs"
+    if path.startswith("tests/") or name.startswith("test_"):
+        return "test"
+    if path.endswith(CONFIG_SUFFIXES) or path.startswith("."):
+        return "chore"
+    return "feat"
 
 
 def _summary(paths: list[str]) -> str:
