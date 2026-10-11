@@ -16,7 +16,8 @@ refactor-pilot scan  <path> [--ref REF] [--out DIR] [--snapshot {worktree,archiv
                             [--exec-probe {on,off}] [--json] [-v]
 refactor-pilot audit <path> [--ref REF] [--out DIR] [--rules FILE] [--json]
 refactor-pilot recall --audit FILE --baseline FILE [--json] [--detail]
-refactor-pilot s5    <path> --plan FILE [--out DIR] [--cell {a,b,d,e}] [--test-cmd CMD]
+refactor-pilot plan  <path> [--ref REF] [--out DIR] [--rules FILE] [--json]
+refactor-pilot s5    <path> --plan FILE [--out DIR] [--stage-id ID] [--cell {a,b,d,e}] [--test-cmd CMD]
 ```
 
 退出码：`0` 成功（**发现问题不算错**）／`1` 运行时错误／`2` 用法错误／`3` 目标不支持。

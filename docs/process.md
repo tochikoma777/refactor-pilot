@@ -40,12 +40,13 @@
 - **已完成**：**S5 最小切片 + D 格**（A/B/D/E 四格）—— toy2 上用**真实 pytest** 走通全流程
 - **已完成**：**首次真实试验**（`/tmp/rp-toy-v1` 跑 K-02 补 pyproject.toml）暴露"创建类任务"边界 → 五处修复（P-21~P-23）
 - **已完成**：**D-06 门禁模型**（创建类任务：A 不产 missing / B 判已创建且非空 / **D 是真正守卫** / E 按表推断 type），见 `design-v2.md` 14.12
+- **已完成**：**commit_type 创建/修改分流**（P-26）+ **阶段 1**：`refactor-pilot plan` 把 audit 缺失型 finding 自动转成 plan（P-27 / `design-v2.md` 14.13）
 - **已冻结的方向**：不再扩张 S2 规则（无验证材料，边际收益趋近零）；不做 S4 规划算法、问卷、完整七格状态机；**语义重构暂不纳入**（第一版只做工程化补课）
-- **质量门**：`ruff` / `mypy` 全绿 · `pytest 99 passed`
+- **质量门**：`ruff` / `mypy` 全绿 · `pytest 106 passed`
 - **规则库现状**：v1 召回 5/5（**全是缺失型送分题**，10.7 早已预警）· 自审计误报 1 条（C06 真问题）
 - **待你确认**：无
-- **下一步**：**阶段 1 —— audit finding → plan 自动转换（S4-lite）**；之后 阶段 2（单命令驱动循环）、阶段 3（换 refactor-pilot clone 端到端验收）
-- **技术债**：D-02（D 格 R4）、**D-06（创建类任务门禁模型）** 均已还清；余下 D-03（C 格）、D-04（F 格）、D-05（R2 反向查）
+- **下一步**：**阶段 2 —— 单命令驱动循环**（`upgrade`：scan→audit→plan→逐阶段推进，AI 只执行工具发出的命令）；之后 阶段 3（换 refactor-pilot clone 端到端验收）
+- **技术债**：D-02（D 格 R4）、**D-06（创建类任务门禁模型）** 均已还清；余下 D-03（C 格）、D-04（F 格）、D-05（R2 反向查）。**新增待办**：多阶段 per-stage 独立状态（当前用"切阶段清进度"近似，阶段 2 细化）
 
 ---
 
@@ -350,6 +351,31 @@
   `test_commit_type_inference_table`
 - **已知取舍**（如实）：`commit_type` 表只看路径不看语义，故"修改已有源码"会落入 `chore`
 
+### P-26 · `commit_type` 创建类 / 修改类分两套 + E 格允许"仅 type"差异
+
+- **结论**（用户裁定方案②）：**D-06 表只用于创建类**；**修改类**沿用旧前缀规则
+  （`docs/`→`docs`、`tests/`/`test_*.py`→`test`、配置文件→`chore`、其它→`feat`）。
+  E 块加一行提示"**type 由路径推断；若本次是修复类改动，请自行改为 `fix`**"；
+  **相应放宽 E 格判据**：允许"仅 type 不同"（scope 与描述仍须逐字一致）
+- **理由**（用户）：`chore` 语义是"非功能性改动"，标源码改动会误导；但 `feat` 对 bugfix 也不准 ——
+  工具判不了语义就**明确标注**，不要假装判得准。既然让改，就不能反过来判它不一致
+- **条款**：`design-v2.md` 14.12
+- **防回归**：`test_commit_type_inference_table`（创建/修改两套）、
+  `test_e_cell_accepts_type_only_change`
+
+### P-27 · 阶段 1：audit finding → plan 自动转换（S4-lite）
+
+- **结论**：新增 `refactor-pilot plan <path>`（内部跑 scan + audit）——把缺失型 finding
+  机械转成阶段（C01→`pyproject.toml`、G05→`.gitignore`、C02→`ruff.toml`、
+  C04→`CODEBUDDY.md`、C06→`.github/workflows/ci.yml`）；**B01（无测试）与语义类不自动规划**，
+  如实列进 `skipped`。plan 支持多阶段（`stages`），`forbidden_paths` 允许为空；
+  S5 用 `--stage-id` 选阶段，**切换阶段时清格进度**（否则 `current_cell` 串台）
+- **理由**：原需求"中间决策尽量少"——不能再让人手写 plan；缺失型 finding 的期望路径已由
+  finding 给出，映射是机械的
+- **条款**：`design-v2.md` 14.13
+- **防回归**：`tests/test_autoplan.py`（映射/去重/跳过/可加载）、
+  `test_switching_stage_resets_cell`
+
 ---
 
 ## 2.5 文档不一致登记
@@ -533,6 +559,28 @@ D 命令退出码非 0  → D 拦下（少了 requires-python，守卫生效）
 ```
 
 `ruff` / `mypy` 全绿 · `pytest 99 passed`
+
+### 阶段 1（audit→plan）+ commit_type 分流验收（2026-10-11）
+
+单测 `106 passed`。真机（`/tmp/rp-toy-v1`，故意先去掉 pyproject.toml）：
+
+```
+$ refactor-pilot plan /tmp/rp-toy-v1 --out /tmp/rp-plan
+refactor-pilot · plan（阶段 1：audit finding → 阶段）
+  阶段数    : 4
+    - c01 → pyproject.toml
+    - c02 → ruff.toml
+    - c04 → CODEBUDDY.md
+    - c06 → .github/workflows/ci.yml
+    （跳过 B01：无测试：生成有意义的测试需要项目知识，交人工）
+
+$ refactor-pilot s5 … --plan plan.json                → 阶段 c01 · A 格
+$ refactor-pilot s5 … --plan plan.json --stage-id c04  → 阶段 c04 · A 格（切阶段不串台）
+$ refactor-pilot s5 … --stage-id nope                  → 报错并列出可选 id
+```
+
+`commit_type`：创建类 `pyproject.toml`→`build`；修改类 `src/…py`→`feat`；
+E 格接受"仅 type"差异（scope 与描述仍逐字一致）。
 
 ### S5 最小切片 · 第 14 节验收（2026-10-11）
 

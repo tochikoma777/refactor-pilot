@@ -1759,7 +1759,9 @@ src 布局若无打包声明，`from acme.schema import ...` 会被判 `external
 "AI 说做完了其实没做好"的，只剩 D 格的实跑证据 —— 所以**没有可执行命令就必须阻塞**，
 让流程停下来要命令，而不是放行。
 
-**`commit_type` 推断表**【必须遵守】
+**`commit_type` 推断**【必须遵守】—— **创建类**与**修改类**分两套：
+
+创建类（不在 git 跟踪里）走 D-06 表：
 
 | 路径 | type |
 | ---- | ---- |
@@ -1769,5 +1771,48 @@ src 布局若无打包声明，`from acme.schema import ...` 会被判 `external
 | `test_*.py` | `test` |
 | 其它 | `chore` |
 
-> ⚠️ 如实标注：该表**只看路径、不看改动语义**。因此对"修改已有源码"的任务，
-> 落在"其它"分支的源码改动会被标成 `chore`（语义分类是 S4 的活，本切片不做）。
+修改类（已有源码）沿用旧前缀规则：`docs/`→`docs`、`tests/` 或 `test_*.py`→`test`、
+配置文件→`chore`、其它→`feat`。
+
+> ⚠️ **为什么不把 D-06 表用于修改类**：`chore` 语义是"非功能性改动"，标源码改动会误导。
+> 但 `feat` 对 **bugfix** 仍不准 —— 工具判不了改动语义，所以：
+> E 块附一行提示"**type 由路径推断；若本次是修复类改动，请自行改为 `fix`**"，
+> 并**相应放宽 E 格判据**：允许**仅 type** 不同（`scope` 与描述仍须逐字一致）。
+> 既然让改，就不能反过来判它不一致。
+
+> ⚠️ 如实标注：推断**只看路径、不看改动语义**。语义分类是 S4 的活，本切片不做。
+
+---
+
+## 14.13 阶段 1：audit finding → plan 自动转换（S4-lite）
+
+> 目的：**不用人写 plan**。把 audit 的缺失型 finding 机械地转成 S5 的阶段。
+
+**命令**：`refactor-pilot plan <path> [--ref REF] [--out DIR] [--rules FILE]`
+（内部跑 scan + audit，产出 `scan.json` / `audit.json` / `plan.json`）
+
+**范围**：只把**缺失型 finding** 转成阶段（工程化补课）。finding 已点名期望路径，映射是机械的：
+
+| rule | writes |
+| ---- | ------ |
+| C01 无依赖声明 | `pyproject.toml` |
+| G05 无 .gitignore | `.gitignore` |
+| C02 无 lint 配置 | `ruff.toml` |
+| C04 无约束文件 | `CODEBUDDY.md` |
+| C06 无 CI | `.github/workflows/ci.yml` |
+
+**明确不自动规划**（如实列进 `plan.json` 的 `skipped`，交人工）—— 这份"不做"清单与做掉的同等重要：
+
+- **B01（无测试）**：生成有意义的测试需要项目知识
+- **语义类（A/I 组）与其它未映射规则**：不猜
+
+**计划形状**：`{"schema_version":1, "stages":[...], "skipped":[...]}`。
+`plan.load_stages()` 读全部；`plan.load()` 只接受单阶段。`forbidden_paths` **允许为空**
+（writes 范围本身已约束 B 格）。
+
+**S5 消费多阶段**：`s5 --plan plan.json [--stage-id ID]`；缺省接着 `state.json` 的当前阶段，
+否则第一个。**切换阶段时清掉上一阶段的格进度**（否则 `current_cell` 会串台）——
+per-stage 的独立状态留到阶段 2 的驱动循环再细化。
+
+**验收**：v1 clone 上 `plan` 由 `audit.json` **全自动生成 4 个阶段**（C01/C02/C04/C06），零手改；
+S5 直接消费，`--stage-id` 可选中任一阶段。
