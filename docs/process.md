@@ -42,12 +42,13 @@
 - **已完成**：**D-06 门禁模型**（创建类任务：A 不产 missing / B 判已创建且非空 / **D 是真正守卫** / E 按表推断 type），见 `design-v2.md` 14.12
 - **已完成**：**commit_type 创建/修改分流**（P-26）+ **阶段 1**：`refactor-pilot plan` 把 audit 缺失型 finding 自动转成 plan（P-27 / `design-v2.md` 14.13）
 - **已完成**：**R6 两道护栏**（type 白名单 + `e_type_override` 留痕，P-28）+ **阶段 2**：`refactor-pilot upgrade` 单命令驱动循环，且 **D 格验收作用域 = 本次改动可用**（P-29 / `design-v2.md` 14.14）
+- **已完成**：**阶段 3 端到端**：3a v1 clone 跑完 4 个阶段（缺失型 4/5 关，B01 设计性跳过，**新冒出 G05**）；3b refactor-pilot clone 跑通并**闭环自证**（补 CI 后 C06 消失）。两个数：**人被问 2 次**（两个项目各 1 次，均为 C06 无 stdlib YAML 校验器）。见 `design-v2.md` 14.15
 - **已冻结的方向**：不再扩张 S2 规则（无验证材料，边际收益趋近零）；不做 S4 规划算法、问卷、完整七格状态机；**语义重构暂不纳入**（第一版只做工程化补课）
 - **质量门**：`ruff` / `mypy` 全绿 · `pytest 110 passed`
 - **规则库现状**：v1 召回 5/5（**全是缺失型送分题**，10.7 早已预警）· 自审计误报 1 条（C06 真问题）
-- **待你确认**：无
-- **下一步**：**阶段 3 —— 换 refactor-pilot 的 clone（`/tmp/rp-toy-self`）端到端验收**，报两个数：① 人被问几次（目标：只有开头给路径）② 缺失型 finding 是否全关掉
-- **技术债**：D-02、D-06 均已还清；余下 D-03（C 格）、D-04（F 格）、D-05（R2 反向查）。**多阶段 per-stage 独立状态**仍用"切阶段清进度"近似
+- **待你确认**：3 条新发现需定夺 —— ① 跨阶段副作用（加 ruff.toml 冒出新 G05）驱动是否要重新 plan ② `autoplan.skipped` 只列 MANUAL_RULES，其余未映射 finding（如 G03）被**静默忽略** ③ 是否把"用现成 js-yaml 校验 ci.yml"固化为 C06 的建议命令
+- **下一步**：待上面 3 条定夺（暂不自动开工）
+- **技术债**：D-02、D-06 均已还清；余下 D-03（C 格）、D-04（F 格）、D-05（R2 反向查）。**多阶段 per-stage 独立状态**仍用"切阶段清进度"近似（4 阶段实测**未串台**）
 
 ---
 
@@ -622,6 +623,20 @@ upgrade → A(c01) → upgrade → B → 实现 pyproject.toml
 ```
 
 R6 护栏：type=`wip` → 拦下；type=`fix`（白名单内）→ 通过，且 `state.e_type_override=[{from:feat,to:fix}]`。
+
+### 阶段 3：端到端（3a v1 clone 四阶段 / 3b self clone 闭环）（2026-10-11）
+
+详见 `design-v2.md` 14.15。摘要：
+
+- **3a**：`/tmp/rp-toy-v1` 用 `upgrade` 单命令驱动跑完 c01/c02/c04/c06（4 次提交）。
+  缺失型 **4/5 关**（C01/C02/C04/C06），**B01 设计性跳过**，且**新冒出 1 条 G05**
+  （加 ruff.toml 后 `.ruff_cache/` 未忽略——跨阶段副作用）。**不是"全部关掉"，如实记录。**
+- **3b**：`/tmp/rp-toy-self`（refactor-pilot clone）跑通 c06；补 CI 后**重跑 audit，C06 消失**
+  —— 闭环自证成立。
+- **人被问 2 次**（两个项目各 1 次，均为 C06 无 stdlib YAML 校验器 → 人给
+  `--test-cmd "bash /tmp/check_ci.sh"`，用现成 js-yaml 真解析）。
+- **per-stage 状态压测（4 阶段）**：**未串台**；且 A 格"零改动"检查点**正确拦下**了我一次
+  乱序驱动（在 A→B 推进前就建了文件）—— 是检查点生效，非故障。
 
 ### S5 最小切片 · 第 14 节验收（2026-10-11）
 
