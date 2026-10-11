@@ -11,7 +11,10 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, gitutil, model, outdir, snapshot
+from . import __version__, gitutil, model, outdir, recall, snapshot
+from .audit import collect_all as audit_all
+from .audit.report import render as render_audit
+from .audit.rules import Rules
 from .model import EXIT_ERROR, EXIT_OK, EXIT_UNSUPPORTED, EXIT_USAGE
 from .scan import collect_all
 
@@ -44,11 +47,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("-v", "--verbose", action="store_true", help="打印细节")
     p_scan.set_defaults(func=_cmd_scan)
 
-    p_audit = sub.add_parser("audit", help="S2 审计：按规则包判定（第 4 步）")
+    p_audit = sub.add_parser("audit", help="S2 审计：按规则包判定")
     p_audit.add_argument("path", help="目标项目路径")
     p_audit.add_argument("--ref", default=None, help="审计该 git ref 的快照")
-    p_audit.add_argument("--out", default=None, help="产物目录")
-    p_audit.add_argument("--rules", default=None, help="规则配置文件（rules.yaml）")
+    p_audit.add_argument("--out", default=None, help="产物目录（默认在仓库之外，见 9.5）")
+    p_audit.add_argument(
+        "--snapshot",
+        choices=snapshot.KINDS,
+        default=snapshot.WORKTREE,
+        help="快照方式（默认 worktree；archive 对源仓库零写入）",
+    )
+    p_audit.add_argument(
+        "--exec-probe",
+        choices=("on", "off"),
+        default="off",
+        help="是否实跑测试命令探测（B03 静默零收集依赖它，默认 off，见 12.5）",
+    )
+    p_audit.add_argument(
+        "--rules",
+        default=None,
+        help="规则配置文件（.toml / .json）：可关规则或改严重度",
+    )
     p_audit.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     p_audit.set_defaults(func=_cmd_audit)
 
@@ -101,22 +120,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
     try:
         with snapshot.create(target, args.ref, kind) as snap:
-            meta = model.new_scan_payload(
-                path=str(target.resolve()),
-                ref=snap.ref,
-                snapshot_kind=snap.kind,
-                resolved_sha=snap.resolved_sha,
-            )
-            families = collect_all(
-                root=snap.root,
-                source=target,  # git 事实始终取自源仓库（12.7）
-                exec_probe=exec_probe,
-            )
-            # 字段族在前、degraded / warnings 在后，与 12.9 的契约顺序一致
-            # （骨架里先占位是为了防止某天忘记填；这里让 families 的版本排在末尾）
-            for name in ("degraded", "warnings"):
-                meta.pop(name, None)
-            payload = {**meta, **families}
+            payload = _build_scan(target, args, snap)
             written = outdir.write_json(out_dir, "scan.json", payload)
     except RuntimeError as exc:
         print(f"快照失败：{exc}", file=sys.stderr)
@@ -129,14 +133,109 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _build_scan(target: Path, args: argparse.Namespace, snap: snapshot.Snapshot) -> dict:
+    """在快照上下文里采集 S1 事实（audit 也复用这一段，保证两者同源）。"""
+    meta = model.new_scan_payload(
+        path=str(target.resolve()),
+        ref=snap.ref,
+        snapshot_kind=snap.kind,
+        resolved_sha=snap.resolved_sha,
+    )
+    families = collect_all(
+        root=snap.root,
+        source=target,  # git 事实始终取自源仓库（12.7）
+        exec_probe=getattr(args, "exec_probe", "off") == "on",
+    )
+    # 字段族在前、degraded / warnings 在后，与 12.9 的契约顺序一致
+    for name in ("degraded", "warnings"):
+        meta.pop(name, None)
+    return {**meta, **families}
+
+
 def _cmd_audit(args: argparse.Namespace) -> int:
-    print("audit 尚未实现（实现顺序第 4 步，见 13.1）", file=sys.stderr)
-    return EXIT_ERROR
+    target = Path(args.path).expanduser()
+    if not target.is_dir():
+        print(f"目标不是目录或不存在：{target}", file=sys.stderr)
+        return EXIT_UNSUPPORTED
+    if args.ref is not None and not gitutil.is_repo(target):
+        print(f"目标不是 git 仓库，无法解析 --ref {args.ref}：{target}", file=sys.stderr)
+        return EXIT_UNSUPPORTED
+
+    kind = args.snapshot if args.ref is not None else snapshot.WORKDIR
+    if args.exec_probe == "on" and args.ref is None:
+        print("WARN 未指定 --ref：实跑将在目标工作目录中进行（12.5）", file=sys.stderr)
+
+    out_dir, inside_repo = outdir.resolve(target, args.out)
+    if inside_repo:
+        print(f"WARN 产物目录在目标仓库内：{out_dir}（默认应在仓库之外，见 9.5）", file=sys.stderr)
+
+    rules = Rules.default()
+    try:
+        rules.load_overrides(args.rules)
+    except (OSError, ValueError) as exc:
+        print(f"规则配置文件读不了：{exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    try:
+        with snapshot.create(target, args.ref, kind) as snap:
+            scan_payload = _build_scan(target, args, snap)
+            written_scan = outdir.write_json(out_dir, "scan.json", scan_payload)
+            payload = model.new_audit_payload(
+                path=str(target.resolve()),
+                ref=snap.ref,
+                snapshot_kind=snap.kind,
+                resolved_sha=snap.resolved_sha,
+                scan_path=str(written_scan),
+            )
+            payload.update(
+                audit_all(root=snap.root, source=target, scan=scan_payload, rules=rules)
+            )
+            written = outdir.write_json(out_dir, "audit.json", payload)
+            outdir.write_text(out_dir, "audit.md", render_audit(payload))
+    except RuntimeError as exc:
+        print(f"快照失败：{exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        _print_audit(payload, written)
+    return EXIT_OK
 
 
 def _cmd_recall(args: argparse.Namespace) -> int:
-    print("recall 尚未实现（实现顺序第 5 步，见 13.1）", file=sys.stderr)
-    return EXIT_ERROR
+    try:
+        result = recall.run(args.audit, args.baseline)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"读不了 audit/baseline：{exc}", file=sys.stderr)
+        return EXIT_USAGE
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(recall.render(result, detail=args.detail))
+    return EXIT_OK
+
+
+def _print_audit(payload: dict, written: Path) -> None:
+    counts = payload["counts"]
+    print("refactor-pilot · audit")
+    print(f"  目标      : {payload['target']['path']}")
+    print(f"  产出      : {written.name} / audit.md（产物目录 {written.parent}）")
+    print(f"  发现      : {counts['total']} 条，其中 blocker {counts['blockers']} 条")
+
+    statement = payload["not_covered"].get("statement")
+    if statement:  # 永远都有（P-15），只是措辞随 Q6 信号变化
+        print("")
+        for line in statement.splitlines():
+            print(f"  {line}")
+
+    print("")
+    for item in payload["findings"]:
+        location = f"{item['file']}:{item['line']}" if item["line"] else item["file"]
+        print(f"  [{item['severity']:<10}] {item['rule']} {location}")
+        print(f"               {item['evidence'][:96]}")
+        for merged in item.get("merged") or []:
+            print(f"               合并计入 {merged['rule']} × {merged['count']}（7.4 抑制）")
 
 
 def _print_scan(payload: dict, written: Path, *, verbose: bool) -> None:

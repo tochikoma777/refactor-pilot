@@ -37,3 +37,25 @@ def new_scan_payload(
         "degraded": [],
         "warnings": [],
     }
+
+
+def new_audit_payload(
+    *,
+    path: str,
+    ref: str | None,
+    snapshot_kind: str,
+    resolved_sha: str | None,
+    scan_path: str | None = None,
+) -> dict:
+    """audit.json 顶层骨架（判定部分由 audit.collect_all 填充，见 3.4）。"""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "target": {
+            "path": path,
+            "ref": ref,
+            "snapshot": snapshot_kind,
+            "resolved_sha": resolved_sha,
+            "scan": scan_path,
+        },
+    }

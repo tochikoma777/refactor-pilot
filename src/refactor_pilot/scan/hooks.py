@@ -58,7 +58,7 @@ def _parse(text: str) -> list[dict]:
     repo: str | None = None
     rev: str | None = None
 
-    for raw in text.splitlines():
+    for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.rstrip()
         if not line.strip() or line.strip().startswith("#"):
             continue
@@ -75,7 +75,9 @@ def _parse(text: str) -> list[dict]:
             if key == "repo":
                 repo, rev = value, None
             elif key == "id":
-                entries.append({"repo": repo, "rev": rev, "id": value, "language": None})
+                entries.append(
+                    {"repo": repo, "rev": rev, "id": value, "language": None, "line": lineno}
+                )
             continue
 
         if key == "repo":
@@ -86,4 +88,6 @@ def _parse(text: str) -> list[dict]:
             entries[-1]["id"] = value
         elif key == "language" and entries:
             entries[-1]["language"] = value
+            # C05 要拿它的行号当证据，不能给 0（P-12：存在型无行号就得降级）
+            entries[-1]["line"] = lineno
     return entries
