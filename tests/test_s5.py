@@ -676,13 +676,68 @@ def test_create_targets_recorded_at_a(tmp_path):
 
 
 def test_commit_type_inference_table():
-    """D-06 的 commit_type 推断表。"""
+    """D-06：创建类走表；修改类沿用旧前缀规则（避免把源码改动标成 chore）。"""
     from refactor_pilot import s5
 
-    assert s5._commit_type("pyproject.toml") == "build"
-    assert s5._commit_type("requirements-dev.txt") == "build"
-    assert s5._commit_type(".github/workflows/ci.yml") == "ci"
-    assert s5._commit_type(".gitignore") == "chore"
-    assert s5._commit_type(".pre-commit-config.yaml") == "chore"
-    assert s5._commit_type("tests/test_foo.py") == "test"
-    assert s5._commit_type("src/acme/core.py") == "chore"
+    # 创建类（D-06 表）
+    assert s5._commit_type("pyproject.toml", created=True) == "build"
+    assert s5._commit_type("requirements-dev.txt", created=True) == "build"
+    assert s5._commit_type(".github/workflows/ci.yml", created=True) == "ci"
+    assert s5._commit_type(".gitignore", created=True) == "chore"
+    assert s5._commit_type(".pre-commit-config.yaml", created=True) == "chore"
+    assert s5._commit_type("tests/test_foo.py", created=True) == "test"
+    assert s5._commit_type("notes.txt", created=True) == "chore"
+    # 修改类（旧前缀规则）：源码改动落 feat，不是 chore
+    assert s5._commit_type("src/acme/core.py", created=False) == "feat"
+    assert s5._commit_type("tests/test_foo.py", created=False) == "test"
+    assert s5._commit_type("docs/guide.md", created=False) == "docs"
+
+
+def test_e_cell_accepts_type_only_change(tmp_path):
+    """E 格允许**仅 type** 不同（工具判不了语义，E 块已提示可改 fix）；scope/描述仍须一致。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out)
+    write_evidence(out)
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # → E
+    state = json.loads((out / "state.json").read_text())
+    expected = state["e_expected"][0]
+    for path in expected["paths"]:
+        git(["add", path], repo)
+    # 仅改 type：feat → fix
+    subject = expected["subject"].replace("feat(", "fix(", 1)
+    git(["commit", "-q", "-m", subject], repo)
+
+    rc = main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
+    assert rc == 0
+    assert cell_of(out) == "done"
+
+
+def test_switching_stage_resets_cell(tmp_path):
+    """多阶段：切到另一阶段应从 A 重新开始，不能串用上一阶段的格进度。"""
+    repo = setup_repo(tmp_path)
+    plan_path = tmp_path / "multi.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "stages": [
+                    {"id": "s1", "type": "ai", "writes": ["src/acme/core.py"],
+                     "forbidden_paths": [], "behavior_spec": "x"},
+                    {"id": "s2", "type": "ai", "writes": ["other.py"],
+                     "forbidden_paths": [], "behavior_spec": "y"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    main(["s5", str(repo), "--plan", str(plan_path), "--out", str(out)])  # s1: A
+    main(["s5", str(repo), "--plan", str(plan_path), "--out", str(out)])  # s1: → B
+    assert cell_of(out) == "B"
+
+    # 切到 s2：应回到 A（若串台会直接停在 B）
+    main(["s5", str(repo), "--plan", str(plan_path), "--out", str(out), "--stage-id", "s2"])
+    assert cell_of(out) == "A"
