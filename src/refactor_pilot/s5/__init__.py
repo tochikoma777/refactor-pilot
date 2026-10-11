@@ -28,11 +28,25 @@ CELLS = ("A", "B", "D", "E")
 STATE_NAME = "state.json"
 FINGERPRINT_LIMIT = 400  # 指纹只存前 N 个文件，避免 state.json 膨胀
 
-NEEDS_MANUAL_ACCEPTANCE = (
-    "扫描里没有可用的 test_cmd，而 D 格不允许静默跳过（14.9 第 3 条）。\n"
-    "请用 `--test-cmd \"<你的验收命令>\"` 把命令给我，我再发 D 格指令。\n"
-    "（state.json 已记 needs_manual_acceptance=true）"
-)
+def _needs_acceptance_message(stage: Stage) -> str:
+    """D 格无命令时的提示。若产物是 YAML，附上**环境里探测到的解析器候选**（让人做选择题）。"""
+    base = (
+        "扫描里没有可用的 test_cmd，而 D 格不允许静默跳过（14.9 第 3 条）。\n"
+        '请用 `--test-cmd "<你的验收命令>"` 把命令给我，我再发 D 格指令。'
+    )
+    yaml_targets = [w for w in stage.writes if w.endswith((".yml", ".yaml"))]
+    if yaml_targets:
+        candidates = facts.yaml_validator_candidates(yaml_targets[0])
+        if candidates:
+            listing = "\n".join(
+                f"  候选 {i}（{c['parser']}）：{c['cmd']}" for i, c in enumerate(candidates, 1)
+            )
+            base += (
+                "\n本阶段产物是 YAML；环境里探测到这些解析器，**选一条**（或自己给）：\n" + listing
+            )
+        else:
+            base += "\n本阶段产物是 YAML，但环境里没探到可用解析器 —— 请自己给一条。"
+    return base + "\n（state.json 已记 needs_manual_acceptance=true）"
 
 CLEAN_REQUIRED = (
     "开工前目标工作树必须干净（决策 8）。\n"
@@ -153,7 +167,7 @@ def run(
         state["needs_manual_acceptance"] = True
         _save_state(out_dir, state)
         return _blocked(
-            stage, "D", NEEDS_MANUAL_ACCEPTANCE, {"needs_manual_acceptance": True}, notes
+            stage, "D", _needs_acceptance_message(stage), {"needs_manual_acceptance": True}, notes
         )
 
     context = _context(scan, stage, root, out_dir, test_cmd=effective_cmd)

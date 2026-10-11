@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import ast
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 from .. import fsutil, gitutil
@@ -41,6 +43,8 @@ def dep_table(
     seen: set[tuple[str, str]] = set()
     tracked = tracked_paths(root)
     for rel in stage.writes:
+        if not rel.endswith(SKIP_SUFFIX):  # 非 Python 目标没有 import 依赖可查
+            continue
         path = root / rel
         tree = parse(path)
         if tree is None:
@@ -244,8 +248,15 @@ def tracked_paths(source: Path) -> set[str]:
 
 
 def worktree_dirty_paths(source: Path) -> list[str]:
-    """`git status --porcelain` 里的改动路径。空列表 = 干净。"""
-    text = gitutil.out(["status", "--porcelain"], cwd=source)
+    """`git status --porcelain` 里的改动路径。空列表 = 干净。
+
+    ⚠️ 必须带 `--untracked-files=all`：否则**新建整个目录**时 git 会把未跟踪文件
+    折叠成 `?? .github/`，与 plan 里的 `writes=[".github/workflows/ci.yml"]` 对不上 →
+    B 格误判"越界"（2026-10-11 实测踩到）。
+    """
+    text = gitutil.out(
+        ["status", "--porcelain", "--untracked-files=all"], cwd=source
+    )
     if text is None:
         return []
     paths: list[str] = []
@@ -396,3 +407,49 @@ def evidence_path(out_dir: Path, stage_id: str) -> Path:
     直接违反只读承诺。指令里给的是**绝对路径**。
     """
     return Path(out_dir) / "evidence" / f"{stage_id}.log"
+
+
+# ──────────────── 验收命令**候选**：YAML 解析器探测（3 条发现之③） ────────────────
+
+
+def _probe(argv: list[str]) -> bool:
+    """探测某个解析器是否**可用**（只跑 import/require 级探测，不碰目标项目）。"""
+    if not shutil.which(argv[0]):
+        return False
+    try:
+        cp = subprocess.run(argv, capture_output=True, timeout=10, text=True)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return cp.returncode == 0
+
+
+def yaml_validator_candidates(file_rel: str) -> list[dict]:
+    """探测环境里有哪些 YAML 解析器，给出**可直接用的候选命令**（让人做选择题）。
+
+    **不固化**某一条：不同环境可用解析器不同（这次是 node 的 js-yaml，别处可能是
+    PyYAML / ruby-psych）。与 Q2"先扫描后问、给候选"同一原则 —— 让人做选择题，不做填空题。
+
+    ⚠️ 这不是"执行被测代码"：只跑解析器的可用性探测，不碰目标仓库。
+    """
+    probes = [
+        (
+            "PyYAML (python)",
+            ["python", "-c", "import yaml"],
+            f"python -c \"import yaml; yaml.safe_load(open('{file_rel}')); "
+            f"print('OK {file_rel}：YAML 合法')\"",
+        ),
+        (
+            "js-yaml (node)",
+            ["node", "-e", "require('js-yaml')"],
+            f"node -e \"require('js-yaml').load(require('fs').readFileSync('{file_rel}','utf8'));"
+            f"console.log('OK {file_rel}：YAML 合法')\"",
+        ),
+        (
+            "psych (ruby)",
+            ["ruby", "-ryaml", "-e", "0"],
+            f"ruby -ryaml -e \"YAML.load_file('{file_rel}'); puts 'OK {file_rel}：YAML 合法'\"",
+        ),
+    ]
+    return [
+        {"parser": name, "cmd": cmd} for name, probe, cmd in probes if _probe(probe)
+    ]
