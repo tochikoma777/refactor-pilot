@@ -43,12 +43,13 @@
 - **已完成**：**commit_type 创建/修改分流**（P-26）+ **阶段 1**：`refactor-pilot plan` 把 audit 缺失型 finding 自动转成 plan（P-27 / `design-v2.md` 14.13）
 - **已完成**：**R6 两道护栏**（type 白名单 + `e_type_override` 留痕，P-28）+ **阶段 2**：`refactor-pilot upgrade` 单命令驱动循环，且 **D 格验收作用域 = 本次改动可用**（P-29 / `design-v2.md` 14.14）
 - **已完成**：**阶段 3 端到端**：3a v1 clone 跑完 4 个阶段（缺失型 4/5 关，B01 设计性跳过，**新冒出 G05**）；3b refactor-pilot clone 跑通并**闭环自证**（补 CI 后 C06 消失）。两个数：**人被问 2 次**（两个项目各 1 次，均为 C06 无 stdlib YAML 校验器）。见 `design-v2.md` 14.15
+- **已完成**：**阶段 3 复盘四条修复**（P-30 / `design-v2.md` 14.15.1）：重规划封顶 / 每条 finding 不得静默 / G03 豁免 / YAML 候选清单 / skipped 交接。**验证时又抓 3 个真 bug**（未跟踪目录折叠、非 Python 目标伪 missing、进度分母）
 - **已冻结的方向**：不再扩张 S2 规则（无验证材料，边际收益趋近零）；不做 S4 规划算法、问卷、完整七格状态机；**语义重构暂不纳入**（第一版只做工程化补课）
-- **质量门**：`ruff` / `mypy` 全绿 · `pytest 110 passed`
+- **质量门**：`ruff` / `mypy` 全绿 · `pytest 117 passed`
 - **规则库现状**：v1 召回 5/5（**全是缺失型送分题**，10.7 早已预警）· 自审计误报 1 条（C06 真问题）
-- **待你确认**：3 条新发现需定夺 —— ① 跨阶段副作用（加 ruff.toml 冒出新 G05）驱动是否要重新 plan ② `autoplan.skipped` 只列 MANUAL_RULES，其余未映射 finding（如 G03）被**静默忽略** ③ 是否把"用现成 js-yaml 校验 ci.yml"固化为 C06 的建议命令
-- **下一步**：待上面 3 条定夺（暂不自动开工）
-- **技术债**：D-02、D-06 均已还清；余下 D-03（C 格）、D-04（F 格）、D-05（R2 反向查）。**多阶段 per-stage 独立状态**仍用"切阶段清进度"近似（4 阶段实测**未串台**）
+- **待你确认**：无
+- **下一步**：待定（阶段 3 与复盘修复已闭环；下一刀方向由你定）
+- **技术债**：D-02、D-06 均已还清；余下 D-03（C 格）、D-04（F 格）、D-05（R2 反向查）。**多阶段 per-stage 独立状态**仍用"切阶段清进度"近似（4+ 阶段实测**未串台**）
 
 ---
 
@@ -403,6 +404,24 @@
   而**存量清零是独立的另一类阶段**，不是"创建配置文件"的验收项；两者混在一起，阶段 3 会全线阻塞
 - **条款**：`design-v2.md` 14.14
 - **防回归**：`test_accept_cmd_flows_into_d_instruction`、`test_upgrade_drives_and_marks_stages_done`
+
+### P-30 · 阶段 3 复盘：修四条 + 又抓 3 个真 bug
+
+- **结论**（用户逐条裁定，规格见 `design-v2.md` 14.15.1）：
+  ① 跨阶段副作用 → **全部 done 后重规划**，只收缺失型，**轮数封顶 3**，超限报"未决，需人工"；
+  ② **每条 finding 三选一（stages / skipped / 不得静默）** + 断言测试；顺带修 G03 误报（测试夹具/示例豁免）；
+  ③ ci.yml **不固化命令**，改为**探测环境 YAML 解析器 + 列候选让人选**（让人做选择题）；
+  ④ 完成报告必须列出 skipped 为**"需 AI/人工处理（交接，不是丢弃）"**
+- **理由**（用户）：② 是原则问题（判了就不能消失）；① 必须封顶否则无限循环；
+  ③ 不同环境解析器不同，固化会硬编码环境假设；B01 是 blocker 却无着落 = ② 的延伸
+- **验证时又抓到 3 个真 bug**（驱动跑一遍才暴露）：
+  1. 新建整个目录 → git 折叠成 `?? .github/` → B 格误判越界（修：`--untracked-files=all`）
+  2. 非 Python 目标（`.gitignore`）被 `dep_table` 误产 `missing` 行 → A 格误拦（修：非 `.py` 跳过）
+  3. 进度分母用了重规划后的 plan 大小 → 打出 "5/1"（修：分母 = 已关 + 待办）
+- **条款**：`design-v2.md` 14.15 / 14.15.1
+- **防回归**：`test_every_finding_is_stage_or_skipped`、`test_g03_exempts_tests_and_examples`、
+  `test_upgrade_done_report_lists_skipped_handoff`、`test_upgrade_replan_cap_reports_pending`、
+  `test_a_cell_allows_non_python_target`、`test_untracked_new_directory_is_in_scope`
 
 ---
 

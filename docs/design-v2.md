@@ -1931,3 +1931,26 @@ upgrade → A(c01) → upgrade → B → 实现 → upgrade → D(用 accept_cmd
 
 3b 的 `B→D` **第一次被拦、重跑即通过**；原因未能复现（疑与我把文件 `git add` 的时序有关）。
 不影响最终结果，记录待观察。
+
+### 14.15.1 复盘修复（用户 2026-10-11 裁定）
+
+| # | 发现 | 修法 |
+| - | ---- | ---- |
+| ① | 跨阶段副作用不被跟踪 | **全部阶段 done 后重规划一次**；新 gap 只收缺失型；**轮数封顶 3**，超限报"仍有 N 个未决，需人工"（改 A 触发 B、改 B 触发 C 会无限循环，必须封顶） |
+| ② | 未映射 finding 被静默忽略 | **铁律：每条 finding 三选一 —— stages / skipped（带原因）/ 不可能静默**。断言测试：`findings 覆盖数 == stages + skipped` |
+| ②b | G03 误报（测试夹具假 key） | 给 G03 加豁免：`tests/` `test/` `examples/` `example/` `fixtures/` `docs/`、`test_*.py`、`*_test.py`、`conftest.py`、名字含 fixture/example/sample/dummy/fake |
+| ③ | ci.yml 无内置验收 | **不固化命令**（各环境解析器不同）。改为**探测环境里有哪些 YAML 解析器**（PyYAML/js-yaml/psych），列成**候选清单让人选** —— "请给一条命令" → "这里有 N 个能用，选一个"。与 Q2"先扫描后问给候选"同一原则：**让人做选择题，不做填空题** |
+| ④ | B01 跳过即消失 | 完成报告必须列出跳过项：**"需 AI/人工处理（交接，不是丢弃）"** |
+
+**验证过程中又抓到 3 个真 bug**（都是"驱动跑一遍"才暴露的）：
+
+1. **新建整个目录时 git 折叠路径**：`git status --porcelain` 对全新未跟踪目录输出 `?? .github/`，
+   与 `writes=[".github/workflows/ci.yml"]` 对不上 → B 格误判"越界"。
+   修：`worktree_dirty_paths` 加 `--untracked-files=all`。
+2. **非 Python 目标的伪 missing 行**：`dep_table` 对 `.gitignore` 这类已存在的非 Python 文件
+   仍产 `missing` 行 → A 格误拦 G05 阶段。修：非 `.py` 目标直接跳过依赖分析。
+3. **进度分母错**：重规划后 `plan.json` 只含新 gap，`len(stages)` 当作分母 → 打出 "5/1"。
+   修：分母 = `已关 + 待办`。
+
+**最终 3a 对账**（修完复跑）：v1 clone findings 只剩 **B01**（正常交接）；
+C01/C02/C04/C06 **+ 新冒出的 G05** 全部关闭。
