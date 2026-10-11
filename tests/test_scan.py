@@ -127,6 +127,52 @@ def test_exec_probe_collection_error_is_not_a_case(tmp_path):
     assert "收集期错误" in (entry["degraded_reason"] or "")
 
 
+def test_script_style_sibling_imports_resolve(tmp_path):
+    """无打包声明（C01 命中）→ A04 切 script-style 解析，兄弟 import 合法（12.13）。
+
+    v1 上实测误报 33 条的根因就在这里：`python x.py` 会把脚本目录放进 sys.path[0]。
+    """
+    repo = make_repo(
+        tmp_path / "repo",
+        {
+            "scripts/train.py": "from language_module import GPTModel\n",
+            "scripts/language_module.py": "class GPTModel:\n    pass\n",
+            "scripts/utils.py": "import helpers\n",
+            "scripts/helpers.py": "X = 1\n",
+        },
+    )
+    rc, payload = scan(repo, out=tmp_path / "out")
+    assert rc == 0
+
+    graph = payload["import_graph"]
+    assert payload["layout"]["packaging_declared"] is False
+    assert graph["unresolved_imports"] == [], "兄弟 import 不该被报成模块不存在"
+    assert graph["edges_internal"]["scripts.train"] == ["scripts.language_module"]
+    assert graph["edges_internal"]["scripts.utils"] == ["scripts.helpers"]
+
+
+def test_packaged_project_keeps_package_path_semantics(tmp_path):
+    """有打包声明时**不启用** script-style：那时兄弟 import 是真的错。"""
+    repo = make_repo(
+        tmp_path / "repo",
+        {
+            "src/acme/pipeline.py": "import sibling\n",
+            "src/acme/sibling.py": "X = 1\n",
+            "src/acme/__init__.py": "",
+            "pyproject.toml": (
+                "[project]\nname = 'demo'\n"
+                "[tool.setuptools.packages.find]\nwhere = ['src']\n"
+            ),
+        },
+    )
+    rc, payload = scan(repo, out=tmp_path / "out")
+    assert rc == 0
+
+    graph = payload["import_graph"]
+    assert payload["layout"]["packaging_declared"] is True
+    assert [r["target"] for r in graph["unresolved_imports"]] == ["sibling"]
+
+
 # ───────────────────────────── 13.2 / 12.3 ─────────────────────────────
 
 

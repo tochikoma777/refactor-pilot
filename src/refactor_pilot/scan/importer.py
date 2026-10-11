@@ -53,6 +53,8 @@ class _Builder:
         self.root = root
         self.modules: dict[str, str] = layout["modules"]
         self.aliases: dict[str, str] = layout.get("module_aliases", {})
+        # C01 命中（无打包声明）→ 切 script-style 解析（7.4 / A04 的抑制机制）
+        self.script_style = not layout.get("packaging_declared", False)
         self.symbols = symbols_by_module(root, self.modules)
         self.name_of_file: dict[str, str] = {rel: name for name, rel in self.modules.items()}
         self.edges: dict[str, set[str]] = {name: set() for name in self.modules}
@@ -97,17 +99,41 @@ class _Builder:
             return dotted
         return self.aliases.get(dotted)
 
+    def sibling(self, rel: str, dotted: str) -> str | None:
+        """script-style 的兄弟解析：`{importer_dir}/{target}.py` 存在即合法。
+
+        Python 跑 `python x.py` 时会把脚本所在目录放进 `sys.path[0]`，
+        所以脚本型仓库里 `from language_module import ...` 完全合法 ——
+        用"包路径解析"去判它，会把每一个兄弟 import 都报成模块不存在
+        （v1 上实测 33 条，全是这类误报）。
+        """
+        if not self.script_style:
+            return None
+        directory = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        parts = dotted.split(".")
+        while parts:
+            candidate = "/".join([p for p in (directory, *parts) if p]) + ".py"
+            name = self.name_of_file.get(candidate)
+            if name:
+                return name
+            parts.pop()
+        return None
+
+    def lookup(self, rel: str, dotted: str) -> str | None:
+        """先按包路径（含 src 布局别名）找，再按 script-style 的兄弟目录找。"""
+        return self.canonical(dotted) or self.sibling(rel, dotted)
+
     def resolve(
         self, dotted: str, source_name: str, rel: str, *, relative: bool, as_symbol: bool = False
     ) -> None:
         """模块目标的解析（``import a.b`` 或 ``from a.b import x`` 的模块部分）。"""
-        module = self.canonical(dotted)
+        module = self.lookup(rel, dotted)
         if module:
             self.link(source_name, module)
             return
         if is_stdlib(dotted.split(".", 1)[0]):
             return
-        if self._has_internal_prefix(dotted):
+        if self._internal_prefix(rel, dotted):
             kind = UNKNOWN
         elif relative:
             kind = RELATIVE
@@ -115,10 +141,10 @@ class _Builder:
             kind = THIRD_PARTY
         self.add(dotted, kind, source_name=source_name, rel=rel, as_symbol=as_symbol)
 
-    def _has_internal_prefix(self, dotted: str) -> bool:
+    def _internal_prefix(self, rel: str, dotted: str) -> bool:
         parts = dotted.split(".")[:-1]
         while parts:
-            if self.canonical(".".join(parts)) is not None:
+            if self.lookup(rel, ".".join(parts)) is not None:
                 return True
             parts.pop()
         return False
@@ -128,7 +154,7 @@ class _Builder:
         base = _base_module(node, source_name, self.modules)
         relative = relative or base == ""
 
-        canonical_base = self.canonical(base)
+        canonical_base = self.lookup(rel, base)
         if canonical_base:
             names = self.symbols.get(canonical_base, set())
             for alias in node.names:
@@ -136,7 +162,7 @@ class _Builder:
                     self.link(source_name, canonical_base)
                     continue
                 candidate = f"{base}.{alias.name}"
-                submodule = self.canonical(candidate)
+                submodule = self.lookup(rel, candidate)
                 if submodule:
                     self.link(source_name, submodule)
                 elif alias.name in names:

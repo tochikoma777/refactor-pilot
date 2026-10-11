@@ -78,10 +78,27 @@ def collect(root: str | os.PathLike[str]) -> dict:
         "modules": dict(sorted(modules.items())),
         "source_roots": source_roots,
         "module_aliases": dict(sorted(_aliases.items())),
+        "packaging_declared": _packaging_declared(base),
         "entry_points": sorted(entry_points),
         "config_files": _config_files(base),
         "test_files": sorted(test_files),
     }
+
+
+# C01 的判据，也是 A04 是否切到 script-style 解析的开关（7.4）
+PACKAGING_DECLARATIONS = (
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "requirements.txt",
+    "Pipfile",
+    "poetry.lock",
+)
+
+
+def _packaging_declared(base: Path) -> bool:
+    """仓库里有没有依赖/打包声明 —— 决定 import 该怎么解析（见 importer 的 script-style）。"""
+    return any(fsutil.is_file(base / name) for name in PACKAGING_DECLARATIONS)
 
 
 def _module_aliases(
