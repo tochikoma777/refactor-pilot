@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="只读重构审计工具：S1 扫描 + S2 审计 + 召回率自检",
     )
     parser.add_argument("--version", action="version", version=f"refactor-pilot {__version__}")
-    sub = parser.add_subparsers(dest="command", metavar="{scan,audit,recall,plan,s5}")
+    sub = parser.add_subparsers(dest="command", metavar="{scan,audit,recall,plan,s5,upgrade}")
 
     p_scan = sub.add_parser("scan", help="S1 扫描：只采集事实，不做判定")
     p_scan.add_argument("path", help="目标项目路径")
@@ -108,6 +108,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="强制渲染指定格（向前跳会打 WARNING 并在 state.json 记 forced）",
     )
     p_s5.set_defaults(func=_cmd_s5)
+
+    p_up = sub.add_parser(
+        "upgrade",
+        help="阶段 2：单命令驱动循环 —— 反复运行即逐阶段推进到全部完成（AI 执行指令）",
+    )
+    p_up.add_argument("path", help="目标项目路径（必须是 git 仓库）")
+    p_up.add_argument("--ref", default=None, help="首次生成 plan 时用该 ref 快照")
+    p_up.add_argument("--out", default=None, help="产物目录（默认在仓库之外，见 9.5）")
+    p_up.add_argument(
+        "--snapshot", choices=("worktree", "archive"), default="worktree", help="快照方式（12.7）"
+    )
+    p_up.add_argument("--rules", default=None, help="规则配置文件（.toml / .json）")
+    p_up.add_argument(
+        "--test-cmd", default=None, help="覆盖当前阶段的验收命令（缺省用 plan 的 accept_cmd）"
+    )
+    p_up.add_argument(
+        "--cell", choices=("a", "b", "d", "e"), default=None, help="调试用：强制推进某一格"
+    )
+    p_up.set_defaults(func=_cmd_upgrade)
 
     p_recall = sub.add_parser("recall", help="召回率自检（第 5 步）")
     p_recall.add_argument("--audit", required=True, help="audit.json 路径")
@@ -250,38 +269,13 @@ def _cmd_plan(args: argparse.Namespace) -> int:
         print(f"目标不是 git 仓库，无法解析 --ref {args.ref}：{target}", file=sys.stderr)
         return EXIT_UNSUPPORTED
 
-    kind = args.snapshot if args.ref is not None else snapshot.WORKDIR
     out_dir, inside_repo = outdir.resolve(target, args.out)
     if inside_repo:
         print(f"WARN 产物目录在目标仓库内：{out_dir}（默认应在仓库之外，见 9.5）", file=sys.stderr)
 
-    rules = Rules.default()
-    try:
-        rules.load_overrides(args.rules)
-    except (OSError, ValueError) as exc:
-        print(f"规则配置文件读不了：{exc}", file=sys.stderr)
-        return EXIT_USAGE
-
-    try:
-        with snapshot.create(target, args.ref, kind) as snap:
-            scan_payload = _build_scan(target, args, snap)
-            written_scan = outdir.write_json(out_dir, "scan.json", scan_payload)
-            audit_payload = model.new_audit_payload(
-                path=str(target.resolve()),
-                ref=snap.ref,
-                snapshot_kind=snap.kind,
-                resolved_sha=snap.resolved_sha,
-                scan_path=str(written_scan),
-            )
-            audit_payload.update(
-                audit_all(root=snap.root, source=target, scan=scan_payload, rules=rules)
-            )
-            outdir.write_json(out_dir, "audit.json", audit_payload)
-            plan_payload = autoplan.build(audit_payload)
-            written = outdir.write_json(out_dir, "plan.json", plan_payload)
-    except RuntimeError as exc:
-        print(f"快照失败：{exc}", file=sys.stderr)
-        return EXIT_ERROR
+    rc, plan_payload, written = _build_plan_files(target, args, out_dir)
+    if rc != EXIT_OK or plan_payload is None or written is None:
+        return rc
 
     if args.json:
         print(json.dumps(plan_payload, ensure_ascii=False, indent=2))
@@ -358,16 +352,135 @@ def _cmd_s5(args: argparse.Namespace) -> int:
         print(f"渲染失败（拒绝输出指令块）：{exc}", file=sys.stderr)
         return EXIT_ERROR
 
+    _emit_s5(result, out_dir)
+    return EXIT_OK if result.status != "blocked" else EXIT_ERROR
+
+
+def _emit_s5(result: s5.Result, out_dir: Path) -> None:
     for line in result.warnings:
         print(f"WARN {line}", file=sys.stderr)
-
     print(f"refactor-pilot · s5 阶段 {result.stage} · {result.cell} 格")
     print(f"  状态      : {result.status}")
     print(f"  {result.message}")
     if result.gate.get("reason"):
         print(f"  检查点    : {result.gate['reason']}")
     print(f"  产物目录  : {out_dir}")
+
+
+def _cmd_upgrade(args: argparse.Namespace) -> int:
+    """阶段 2：单命令驱动循环 —— 反复运行本命令即逐格推进到全部阶段完成。
+
+    工具仍**不执行**被测代码 / git 写操作；执行者是 AI。人只需给一次路径。
+    """
+    target = Path(args.path).expanduser()
+    if not target.is_dir():
+        print(f"目标不是目录或不存在：{target}", file=sys.stderr)
+        return EXIT_UNSUPPORTED
+    if not s5.is_git_repo(target):
+        print(f"目标不是 git 仓库（E 格无法判定提交）：{target}", file=sys.stderr)
+        return EXIT_UNSUPPORTED
+
+    out_dir, inside_repo = outdir.resolve(target, args.out)
+    if inside_repo:
+        print(f"WARN 产物目录在目标仓库内：{out_dir}（见 9.5）", file=sys.stderr)
+
+    plan_path = Path(out_dir) / "plan.json"
+    if not ((Path(out_dir) / "scan.json").is_file() and plan_path.is_file()):
+        print("（首次运行：先 scan + audit + 自动生成 plan）")
+        rc, _, _ = _build_plan_files(target, args, out_dir)
+        if rc != EXIT_OK:
+            return rc
+
+    try:
+        stages = s5.plan.load_stages(plan_path)
+    except s5.plan.PlanError as exc:
+        print(f"计划文件不合法：{exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    done = list(_read_state(out_dir).get("done_stages") or [])
+    remaining = [stage for stage in stages if stage.id not in done]
+    if not remaining:
+        print(f"refactor-pilot · upgrade · 全部 {len(stages)} 个阶段已完成 ✅")
+        for stage in stages:
+            print(f"    ✓ {stage.id} → {', '.join(stage.writes)}")
+        return EXIT_OK
+
+    stage = remaining[0]
+    print(f"refactor-pilot · upgrade（已完成 {len(done)}/{len(stages)}，当前阶段 {stage.id}）")
+    notes: list[str] = []
+    try:
+        result = s5.run(
+            target=target,
+            stage=stage,
+            out_dir=out_dir,
+            cell=args.cell,
+            warnings=notes,
+            test_cmd=args.test_cmd,
+        )
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_USAGE
+    except s5.render.RenderError as exc:
+        print(f"渲染失败（拒绝输出指令块）：{exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    _emit_s5(result, out_dir)
+    if result.status == "done":
+        state = _read_state(out_dir)
+        done = list(state.get("done_stages") or [])
+        if stage.id not in done:
+            done.append(stage.id)
+        state["done_stages"] = done
+        outdir.write_json(Path(out_dir), "state.json", state)
+        print(f"  → 阶段 {stage.id} 完成（{len(done)}/{len(stages)}）；再运行一次进入下一阶段")
     return EXIT_OK if result.status != "blocked" else EXIT_ERROR
+
+
+def _read_state(out_dir: Path) -> dict:
+    path = Path(out_dir) / "state.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _build_plan_files(
+    target: Path, args: argparse.Namespace, out_dir: Path
+) -> tuple[int, dict | None, Path | None]:
+    """scan + audit + autoplan，落 scan.json / audit.json / plan.json。"""
+    rules = Rules.default()
+    try:
+        rules.load_overrides(getattr(args, "rules", None))
+    except (OSError, ValueError) as exc:
+        print(f"规则配置文件读不了：{exc}", file=sys.stderr)
+        return EXIT_USAGE, None, None
+
+    ref = getattr(args, "ref", None)
+    kind = getattr(args, "snapshot", "worktree") if ref is not None else snapshot.WORKDIR
+    try:
+        with snapshot.create(target, ref, kind) as snap:
+            scan_payload = _build_scan(target, args, snap)
+            written_scan = outdir.write_json(out_dir, "scan.json", scan_payload)
+            audit_payload = model.new_audit_payload(
+                path=str(target.resolve()),
+                ref=snap.ref,
+                snapshot_kind=snap.kind,
+                resolved_sha=snap.resolved_sha,
+                scan_path=str(written_scan),
+            )
+            audit_payload.update(
+                audit_all(root=snap.root, source=target, scan=scan_payload, rules=rules)
+            )
+            outdir.write_json(out_dir, "audit.json", audit_payload)
+            plan_payload = autoplan.build(audit_payload)
+            written = outdir.write_json(out_dir, "plan.json", plan_payload)
+    except RuntimeError as exc:
+        print(f"快照失败：{exc}", file=sys.stderr)
+        return EXIT_ERROR, None, None
+    return EXIT_OK, plan_payload, written
 
 
 def _cmd_recall(args: argparse.Namespace) -> int:
