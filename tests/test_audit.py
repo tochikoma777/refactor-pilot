@@ -107,6 +107,30 @@ def test_missing_type_keeps_severity_but_code_rule_degrades():
     assert code_issue["confidence"] == "low"
 
 
+def test_line_na_exemption_is_a_closed_list():
+    """豁免是**封闭清单**（P-16）：除了清单里的，任何规则 line=0 都得降级。
+
+    这条守卫存在的意义：不封闭的话，实现得偷懒的规则都能自证豁免，
+    7.1 原则 2 就被架空。加规则进清单必须同时改这里 + 写明理由。
+    """
+    from refactor_pilot.audit.findings import LINE_NOT_APPLICABLE, FindingFactory
+
+    assert LINE_NOT_APPLICABLE == {
+        "B01", "C01", "C02", "C04", "C06", "G05",  # 缺失型
+        "G01", "G02", "G07",                        # 整文件型
+    }, "清单被改动过？那必须在 commit message 里写明理由"
+
+    factory = FindingFactory(Rules.default())
+    for rule_id in sorted(Rules.default().entries):
+        finding = factory.make(rule_id, file="x.py", line=0, evidence="e")
+        if finding is None:
+            continue
+        if rule_id in LINE_NOT_APPLICABLE:
+            assert finding["severity"] != "unverified", f"{rule_id} 属于不适用清单，不该降级"
+        else:
+            assert finding["severity"] == "unverified", f"{rule_id} 拿不出行号就必须降级"
+
+
 def test_a03_and_c05_carry_real_lines(tmp_path):
     """A03 / C05 都给得出真实行号，不该被降级成 unverified。"""
     repo = make_repo(

@@ -27,14 +27,23 @@ from __future__ import annotations
 
 from .rules import UNVERIFIED, Rules
 
-# 判"某文件/目录不存在"的规则 —— `line = 0` 表示"不适用"
+# ── 两类"`line = 0` 表示不适用"的**封闭清单**（P-12 / P-16）──────────────
+#
+# 判据是"**规则判的对象不是某一行**"，不是"实现者懒得找行号"。
+# 两个清单都封闭：**新增规则默认不在清单内**，要加入必须在同一 commit 里
+# 写明理由（改这里 + 改 tests/test_audit.py 的守卫用例）。
+# 其余任何规则 `line = 0` → 一律降级 `unverified`。
+#
+# 为什么必须封闭：不封闭的话，任何规则实现得偷懒都能自证豁免，
+# 7.1 原则 2（"每条 finding 必须带 file:line 证据"）就被架空。
+
+# 判"某文件/目录不存在" —— 根本不可能有行号
 MISSING_TYPE_RULES = frozenset({"B01", "C01", "C02", "C04", "C06", "G05"})
 
-# 判"整个文件/目录"的规则 —— 同样不存在"行号"这个概念
-# （扩这条的理由与缺失型一致：这类规则的证据是路径 + 体积/跟踪状态，可复核）
-WHOLE_FILE_RULES = frozenset({"G01", "G02", "G07"})
+# 判"整个文件/目录"（非缺失型，但对象仍不是某一行）
+LINE_NA_RULES = frozenset({"G01", "G02", "G07"})
 
-LINE_NOT_APPLICABLE = MISSING_TYPE_RULES | WHOLE_FILE_RULES
+LINE_NOT_APPLICABLE = MISSING_TYPE_RULES | LINE_NA_RULES
 
 
 class FindingFactory:
