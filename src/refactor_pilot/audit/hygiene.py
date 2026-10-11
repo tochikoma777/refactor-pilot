@@ -149,6 +149,8 @@ def _gitignore(root: Path, scan: dict, factory: FindingFactory) -> list[dict]:
 def _secrets(root: Path, tracked_files: list[str], factory: FindingFactory) -> list[dict]:
     findings: list[dict] = []
     for rel in tracked_files:
+        if _g03_exempt(rel):
+            continue
         path = root / rel
         text = fsutil.read_text(path)
         if text is None:
@@ -161,6 +163,22 @@ def _secrets(root: Path, tracked_files: list[str], factory: FindingFactory) -> l
             if finding:
                 findings.append(finding)
     return findings
+
+
+# G03 豁免：测试夹具 / 示例里出现 `api_key = "..."` 是**常态**，不是泄露。
+# （2026-10-11 自审计抓到：本仓库 tests/test_audit.py 的假 key 被误报）
+G03_EXEMPT_DIRS = ("tests/", "test/", "examples/", "example/", "fixtures/", "docs/")
+G03_EXEMPT_TOKENS = ("fixture", "example", "sample", "dummy", "fake")
+
+
+def _g03_exempt(rel: str) -> bool:
+    lowered = rel.lower()
+    if lowered.startswith(G03_EXEMPT_DIRS):
+        return True
+    name = Path(rel).name.lower()
+    if name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py":
+        return True
+    return any(token in name for token in G03_EXEMPT_TOKENS)
 
 
 def _mask(text: str) -> str:
