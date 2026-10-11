@@ -24,9 +24,15 @@ from .. import gitutil, outdir
 from . import facts, render
 from .plan import Stage
 
-CELLS = ("A", "B", "E")
+CELLS = ("A", "B", "D", "E")
 STATE_NAME = "state.json"
 FINGERPRINT_LIMIT = 400  # 指纹只存前 N 个文件，避免 state.json 膨胀
+
+NEEDS_MANUAL_ACCEPTANCE = (
+    "扫描里没有可用的 test_cmd，而 D 格不允许静默跳过（14.9 第 3 条）。\n"
+    "请用 `--test-cmd \"<你的验收命令>\"` 把命令给我，我再发 D 格指令。\n"
+    "（state.json 已记 needs_manual_acceptance=true）"
+)
 
 CLEAN_REQUIRED = (
     "开工前目标工作树必须干净（决策 8）。\n"
@@ -54,6 +60,7 @@ def run(
     out_dir: Path,
     cell: str | None = None,
     warnings: list[str] | None = None,
+    test_cmd: str | None = None,
 ) -> Result:
     """推进一格；`warnings` 由调用方传入以收集 WARNING 文本供打印。"""
     notes = warnings if warnings is not None else []
@@ -78,14 +85,28 @@ def run(
             "—— 绕过了前一格的检查点，state.json 已记 forced=true"
         )
 
+    if test_cmd:
+        state["test_cmd"] = test_cmd
+        state["needs_manual_acceptance"] = False
+
     # 前置条件：切片开工（或仍在 A 格）时工作树必须干净（14.3）
     if requested == "A" and state.get("current_cell") in (None, "A"):
         dirty = facts.worktree_dirty_paths(root)
         if dirty:
             return _blocked(stage, "A", CLEAN_REQUIRED, {"dirty": dirty}, notes)
 
-    gate = _gate_for(state, root, stage, requested, modules, aliases) if not forced else None
+    gate = (
+        _gate_for(state, root, stage, requested, modules, aliases, out_dir)
+        if not forced
+        else None
+    )
     if gate is not None and not gate["passed"]:
+        # "重发 D 格指令"（14.9 ②）：指令块要按**当前**命令重渲染，
+        # 否则会停在旧命令上（改了 --test-cmd 之后尤其明显）
+        if requested == "D":
+            cmd = test_cmd or state.get("test_cmd")
+            if cmd:
+                _rerender_d(scan, stage, root, out_dir, cmd, notes)
         return _blocked(stage, requested, gate["reason"], gate, notes)
 
     # 检查点通过且是"正常推进"（非 --cell 指定）→ 最多前进一格
@@ -111,8 +132,20 @@ def run(
             )
         requested, gate, advanced = nxt, None, True
 
-    context = _context(scan, stage, root, out_dir)
+    # 前置条件 2：D 格没有可用 test_cmd → 不许静默跳过（14.9 第 3 条）
+    # 注意位置：必须在"可能被推进到 D"之后判，否则 B 通过顺带渲染 D 时会漏检
+    effective_cmd = test_cmd or state.get("test_cmd")
+    if requested == "D" and not effective_cmd:
+        state["needs_manual_acceptance"] = True
+        _save_state(out_dir, state)
+        return _blocked(
+            stage, "D", NEEDS_MANUAL_ACCEPTANCE, {"needs_manual_acceptance": True}, notes
+        )
+
+    context = _context(scan, stage, root, out_dir, test_cmd=effective_cmd)
     text = render.instruction(requested, context)
+    if requested == "D":
+        outdir.ensure(out_dir / "evidence")  # 否则指令里那条 tee 会因目录不存在而失败
     written = render.write_instruction(out_dir, stage.id, requested, text)
 
     _record_baseline(state, requested, root, context)
@@ -130,6 +163,16 @@ def run(
         instruction=written,
         warnings=notes,
     )
+
+
+def _rerender_d(
+    scan: dict, stage: Stage, root: Path, out_dir: Path, cmd: str, notes: list[str]
+) -> None:
+    """重发 D 格指令（fail 时用当前命令重渲染，避免指令停在旧命令上）。"""
+    context = _context(scan, stage, root, out_dir, test_cmd=cmd)
+    outdir.ensure(out_dir / "evidence")
+    written = render.write_instruction(out_dir, stage.id, "D", render.instruction("D", context))
+    notes.append(f"已重发 D 格指令：{written}")
 
 
 def _blocked(stage: Stage, cell: str, reason: str, gate: dict, notes: list[str]) -> Result:
@@ -161,6 +204,7 @@ def _gate_for(
     requested: str,
     modules: dict,
     aliases: dict,
+    out_dir: Path,
 ) -> dict | None:
     """当前格可验则验；首次渲染（还没记过格）返回 None。"""
     if state.get("current_cell") != requested:
@@ -169,6 +213,8 @@ def _gate_for(
         return _gate_a(state, root, stage, modules, aliases)
     if requested == "B":
         return _gate_b(root, stage)
+    if requested == "D":
+        return _gate_d(state, root, stage, out_dir)
     return _gate_e(state, root)
 
 
@@ -249,6 +295,37 @@ def _gate_b(root: Path, stage: Stage) -> dict:
     }
 
 
+def _gate_d(state: dict, root: Path, stage: Stage, out_dir: Path) -> dict:
+    """D 格：读证据日志判三要素（exit code / 用例数 / 关键输出行）。"""
+    del root
+    log = facts.evidence_path(out_dir, stage.id)
+    text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else None
+    parsed = facts.parse_evidence(text)
+
+    if parsed["problems"]:
+        return {
+            "passed": False,
+            "reason": (
+                "D 格判未完成（缺证据即未完成，4.2①）：\n  "
+                + "\n  ".join(parsed["problems"])
+                + f"\n→ 请重新执行 D 格指令，把输出写到 {log}"
+            ),
+            "evidence": str(log),
+            **{key: parsed[key] for key in ("exit_code", "collected")},
+        }
+    return {
+        "passed": True,
+        "reason": (
+            f"D 格通过：退出码 0，收集 {parsed['collected']} 个用例，"
+            f"关键输出 {len(parsed['key_lines'])} 行"
+        ),
+        "evidence": str(log),
+        "exit_code": parsed["exit_code"],
+        "collected": parsed["collected"],
+        "key_lines": parsed["key_lines"],
+    }
+
+
 def _gate_e(state: dict, root: Path) -> dict:
     dirty = facts.worktree_dirty_paths(root)
     expected = state.get("e_expected") or []
@@ -314,12 +391,17 @@ def _fingerprint_drift(baseline: dict | None, root: Path) -> list[str]:
 # ────────────────────────────── 上下文与状态 ──────────────────────────────
 
 
-def _context(scan: dict, stage: Stage, root: Path, out_dir: Path) -> dict:
-    modules = (scan.get("layout") or {}).get("modules") or {}
+def _context(
+    scan: dict, stage: Stage, root: Path, out_dir: Path, test_cmd: str | None = None
+) -> dict:
+    layout = scan.get("layout") or {}
+    modules = layout.get("modules") or {}
+    aliases = layout.get("module_aliases") or {}
     constraints_file = (scan.get("constraints_file") or {}).get("path")
-    test_cmd = ((scan.get("toolchain") or {}).get("test_cmd") or {}).get("suggested") or (
-        (scan.get("toolchain") or {}).get("test_cmd") or {}
-    ).get("cmd")
+    # ⚠️ 别把参数 test_cmd 覆盖掉：它是人的显式指定，优先级高于扫描的建议值
+    entry = (scan.get("toolchain") or {}).get("test_cmd") or {}
+    scanned_cmd = entry.get("suggested") or entry.get("cmd")
+    effective_cmd = test_cmd or scanned_cmd
 
     commit_plan = _commit_plan(facts.worktree_dirty_paths(root), stage)
     return {
@@ -328,7 +410,7 @@ def _context(scan: dict, stage: Stage, root: Path, out_dir: Path) -> dict:
             "path": str(root),
             "constraints_file": constraints_file,
             "no_constraints": not constraints_file,
-            "test_cmd_or_placeholder": test_cmd or "<test_cmd 未探到，请自行替换>",
+            "test_cmd_or_placeholder": effective_cmd or "<test_cmd 未探到，请自行替换>",
         },
         "stage": {
             "id": stage.id,
@@ -339,7 +421,12 @@ def _context(scan: dict, stage: Stage, root: Path, out_dir: Path) -> dict:
             "evidence_log": f".upgrade/evidence/{stage.id}.log",
         },
         "facts": {
-            "dep_table": facts.dep_table(root, stage, modules),
+            "dep_table": facts.dep_table(root, stage, modules, aliases),
+            "external_deps": facts.external_deps(root, stage, modules, aliases),
+            "has_external": bool(facts.external_deps(root, stage, modules, aliases)),
+            "test_cmd": effective_cmd or "",
+            "test_cmd_is_suggested": _test_cmd_is_suggested(scan, effective_cmd),
+            "evidence_path": str(facts.evidence_path(out_dir, stage.id)),
             "contract_snapshot": facts.contract_snapshot(root, stage, modules),
             "constraints_expected": facts.constraints_expected(root, constraints_file),
             "commit_plan": commit_plan,
@@ -377,6 +464,14 @@ def _commit_plan(changed: list[str], stage: Stage) -> list[dict]:
             }
         )
     return plan
+
+
+def _test_cmd_is_suggested(scan: dict, test_cmd: str | None) -> bool:
+    """这条 test_cmd 是扫描的"建议值"（未经实跑验证）吗？"""
+    entry = (scan.get("toolchain") or {}).get("test_cmd") or {}
+    if not test_cmd:
+        return False
+    return test_cmd != entry.get("cmd") and test_cmd == entry.get("suggested")
 
 
 def _commit_type(path: str) -> str:

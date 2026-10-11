@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 from .. import fsutil, gitutil
@@ -71,6 +72,19 @@ def dep_table(
                 }
             )
     return rows
+
+
+def external_deps(root: Path, stage: Stage, modules: dict[str, str],
+                   aliases: dict[str, str] | None = None) -> list[str]:
+    """依赖表里状态为 `external` 的条目（本工具判不了、按三方依赖处理）。
+
+    **R1 在这里降级** —— 所以 A 格指令块必须把它单列出来给人看，
+    不能只躺在表格里（用户 2026-10-11：R1 是最高价值规则，悄悄退化无人知道）。
+    """
+    return sorted(
+        {row["depends_on"] for row in dep_table(root, stage, modules, aliases)
+         if row["status"] == "external"}
+    )
 
 
 def _dependencies(tree: ast.Module) -> list[str]:
@@ -252,3 +266,83 @@ def recent_subjects(source: Path, count: int) -> list[str]:
 def fingerprint(root: Path) -> dict[str, list[int]]:
     """源码指纹：A 格"运行前后零改动"的基准。"""
     return {rel: list(value) for rel, value in fsutil.fingerprint(root).items()}
+
+
+# ────────────────────────────── D 格 · 证据日志解析 ──────────────────────────────
+
+EXIT_MARKER = re.compile(r"^RP_EXIT_CODE=(\d+)\s*$", re.MULTILINE)
+COLLECTED_MARKER = re.compile(r"collected (\d+) items?")
+COUNTED = re.compile(r"(\d+) (passed|failed|error|errors|xfailed|xpassed|skipped)")
+
+
+def parse_evidence(text: str | None) -> dict:
+    """读证据日志 → 判定三要素（design-v2 14.9）。
+
+    - `exit_code`：靠指令里的 `RP_EXIT_CODE=$?` 标记（`tee` 之后的管道退出码不可靠）
+    - `collected`：用例数，**0 要判失败**（B03 那条：静默选 0 个）
+    - `key_lines`：关键输出行（排除我们自己的标记行后的非空输出）
+
+    缺任何一项 → `problems` 非空 → D 格判未完成并重发指令。
+    """
+    problems: list[str] = []
+    if not text or not text.strip():
+        return {
+            "exit_code": None,
+            "collected": None,
+            "key_lines": [],
+            "problems": ["没有证据文件（或它是空的）—— 没有证据即判定未完成（4.2①）"],
+        }
+
+    exit_match = EXIT_MARKER.search(text)
+    exit_code = int(exit_match.group(1)) if exit_match else None
+    if exit_code is None:
+        problems.append("日志里没有 `RP_EXIT_CODE=` 标记 —— 无法判定退出码")
+    elif exit_code != 0:
+        problems.append(f"退出码 = {exit_code}（非 0）")
+
+    collected = _collected(text)
+    if collected is None:
+        problems.append("日志里读不出用例数 —— 无法排除「静默选 0 个用例」")
+    elif collected == 0:
+        problems.append("收集到 0 个用例（静默零收集，等同没有测试）")
+
+    key_lines = _key_lines(text)
+    if not key_lines:
+        problems.append("日志里没有任何输出行 —— 只有标记不算证据")
+
+    return {
+        "exit_code": exit_code,
+        "collected": collected,
+        "key_lines": key_lines[:20],
+        "problems": problems,
+    }
+
+
+def _collected(text: str) -> int | None:
+    if "no tests ran" in text:
+        return 0
+    match = COLLECTED_MARKER.search(text)
+    if match:
+        return int(match.group(1))
+    counts = [int(value) for value, _ in COUNTED.findall(text)]
+    return sum(counts) if counts else None
+
+
+def _key_lines(text: str) -> list[str]:
+    kept: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or EXIT_MARKER.match(stripped):
+            continue
+        kept.append(stripped)
+    return kept
+
+
+def evidence_path(out_dir: Path, stage_id: str) -> Path:
+    """证据日志位置。
+
+    ⚠️ 与 4.2① 的字面写法（`.upgrade/evidence/<stage>.log`）不同：按决策 #29 / 9.5，
+    产物默认**仓库之外**，所以证据也必须落在仓库外 —— 否则 D 格会把日志写进被审计仓库，
+    直接违反只读承诺。指令里给的是**绝对路径**。
+    """
+    return Path(out_dir) / "evidence" / f"{stage_id}.log"

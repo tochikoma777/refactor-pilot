@@ -145,6 +145,15 @@ grep -c "RP:CONSTRAINT:" {{project.constraints_file}}
 {{/each}}
 任一行是 `stub` / `missing` → 停下来说明，不要开始实现。
 
+{{#if facts.has_external}}### ⚠️ R1 在本阶段**降级**了，以下依赖我判不了
+
+{{#each facts.external_deps}}- `{{this}}`
+{{/each}}
+它们在仓库里找不到、也不是标准库，我按「三方依赖」处理，**没有阻塞**。
+如果其中其实有本仓库的模块（例如 src 布局却没写打包声明），请**明确指出** ——
+这类降级不报出来就等于 R1 悄悄失效。
+{{/if}}
+
 ## 2. 命名核对（R2）
 
 仓库现有契约（**名字一律沿用**，我只描述行为）：
@@ -219,7 +228,36 @@ git rev-list --count HEAD
 预期提交总数：{{facts.expected_rev_count}}。
 """
 
-TEMPLATES = {"A": A_TEMPLATE, "B": B_TEMPLATE, "E": E_TEMPLATE}
+D_TEMPLATE = """# [{{project.name}}] 阶段 {{stage.id}} · D 格实跑验收（R4）
+
+## 1. 跑这条命令（**由你执行，本工具不执行被测代码**）
+
+```bash
+{ {{facts.test_cmd}} 2>&1; echo "RP_EXIT_CODE=$?"; } | tee {{facts.evidence_path}}
+```
+
+{{#if facts.test_cmd_is_suggested}}
+> ⚠️ 这条命令来自扫描的**建议值**（未经实跑验证）。
+> 跑不起来就直接把可用的命令告诉我。
+{{/if}}
+## 2. 证据必须包含三要素（缺一即判未完成）
+
+| 要素 | 要求 |
+| ---- | ---- |
+| 退出码 | 日志里要有 `RP_EXIT_CODE=` 标记（上面的命令会自动带上） |
+| 用例数 | 要有 `N passed` / `collected N items` 之类的汇总行；**收集到 0 个用例算失败** |
+| 关键输出行 | 要有实际输出，只有标记不算证据 |
+
+**不要**手写证据文件、**不要**改日志内容 —— 下次运行我会读它并逐项核对。
+
+## 3. 跑完再运行本工具
+
+我会读 `{{facts.evidence_path}}` 判定；没有证据文件 = 未完成，我会重发这条指令。
+
+{{> common/_constraints_block}}
+"""
+
+TEMPLATES = {"A": A_TEMPLATE, "B": B_TEMPLATE, "D": D_TEMPLATE, "E": E_TEMPLATE}
 
 
 def instruction(cell: str, context: dict) -> str:

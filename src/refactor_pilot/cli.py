@@ -78,8 +78,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_s5.add_argument("--plan", required=True, help="手写单阶段计划（JSON，见 14.2）")
     p_s5.add_argument("--out", default=None, help="产物目录（默认在仓库之外，见 9.5）")
     p_s5.add_argument(
+        "--test-cmd",
+        default=None,
+        help="D 格的验收命令（扫描探不到时必须由人给出，见 14.9）",
+    )
+    p_s5.add_argument(
         "--cell",
-        choices=("a", "b", "e"),
+        choices=("a", "b", "d", "e"),
         default=None,
         help="强制渲染指定格（向前跳会打 WARNING 并在 state.json 记 forced）",
     )
@@ -244,6 +249,7 @@ def _cmd_s5(args: argparse.Namespace) -> int:
             out_dir=out_dir,
             cell=args.cell,
             warnings=notes,
+            test_cmd=args.test_cmd,
         )
     except FileNotFoundError as exc:
         print(str(exc), file=sys.stderr)
