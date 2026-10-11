@@ -517,6 +517,7 @@ def _context(
             "behavior_spec": stage.behavior_spec,
             # 证据文件位置：与 D 格一致，落在**仓库外**（决策 #29 / 9.5）
             "evidence_log": str(facts.evidence_path(out_dir, stage.id)),
+            "scaffold": stage.scaffold or "",
         },
         "facts": {
             "dep_table": facts.dep_table(root, stage, modules, aliases),

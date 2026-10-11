@@ -190,6 +190,10 @@ B_TEMPLATE = """# [{{project.name}}] 阶段 {{stage.id}} · B 格实现
 {{#each facts.contract_snapshot}}- `{{this.symbol}}{{this.signature}}`
 {{/each}}
 
+{{#if stage.scaffold}}## 4. 骨架（工具生成的**机械部分** —— 断言由你填，工具不编造）
+
+{{stage.scaffold}}
+{{/if}}
 【期望行为】
 
 {{stage.behavior_spec}}

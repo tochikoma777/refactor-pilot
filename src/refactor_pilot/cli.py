@@ -529,7 +529,7 @@ def _build_plan_files(
                 audit_all(root=snap.root, source=target, scan=scan_payload, rules=rules)
             )
             outdir.write_json(out_dir, "audit.json", audit_payload)
-            plan_payload = autoplan.build(audit_payload)
+            plan_payload = autoplan.build(audit_payload, scan_payload, snap.root)
             written = outdir.write_json(out_dir, "plan.json", plan_payload)
     except RuntimeError as exc:
         print(f"快照失败：{exc}", file=sys.stderr)

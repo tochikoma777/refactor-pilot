@@ -33,6 +33,7 @@ class Stage:
     forbidden_paths: tuple[str, ...]
     behavior_spec: str
     accept_cmd: str | None = None  # D 格的验收命令（缺省时可由 --test-cmd 覆盖）
+    scaffold: str | None = None  # B 格附带的骨架文本（工具生成的机械部分，交 AI 填语义）
 
 
 def load(path: str | os.PathLike[str]) -> Stage:
@@ -103,6 +104,10 @@ def _to_stage(stage: object, index: int) -> Stage:
     if accept is not None and (not isinstance(accept, str) or not accept.strip()):
         raise PlanError(f"{where}.accept_cmd 必须是非空字符串（或省略）")
 
+    scaffold = stage.get("scaffold")
+    if scaffold is not None and not isinstance(scaffold, str):
+        raise PlanError(f"{where}.scaffold 必须是字符串（或省略）")
+
     return Stage(
         id=str(stage["id"]),
         type=str(stage["type"]),
@@ -110,6 +115,7 @@ def _to_stage(stage: object, index: int) -> Stage:
         forbidden_paths=forbidden,
         behavior_spec=behavior,
         accept_cmd=accept,
+        scaffold=scaffold,
     )
 
 
