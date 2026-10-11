@@ -254,7 +254,7 @@ def test_forced_cell_jump_warns_and_records(tmp_path, capsys):
     rc = main(["s5", str(repo), "--plan", str(plan), "--out", str(out), "--cell", "e"])
     assert rc == 0
     captured = capsys.readouterr()
-    assert "WARNING" in captured.err
+    assert "强制跳到" in captured.err  # CLI 已加 `WARN ` 前缀，文案不再自带 WARNING
     state = json.loads((out / "state.json").read_text())
     assert state["forced"] is True
     assert state["current_cell"] == "E"
@@ -299,15 +299,24 @@ def test_s5_does_not_touch_target_sources(tmp_path):
 # ────────────────────────────── D 格（实跑验收 R4） ──────────────────────────────
 
 
-def to_d(repo: Path, plan: Path, out: Path, *, change: bool = True) -> None:
+def to_d(repo: Path, plan: Path, out: Path, *, change: bool = True,
+         cmd: str = "pytest -q") -> None:
     """走到 D 格：A → B（改 writes 内文件）→ D。"""
     main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # A
     main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # → B
     if change:
         (repo / "src/acme/core.py").write_text("VALUE = 7\n")
     main(["s5", str(repo), "--plan", str(plan), "--out", str(out),
-          "--test-cmd", "pytest -q"])  # → D
+          "--test-cmd", cmd])  # → D
     assert cell_of(out) == "D"
+
+
+def write_raw_evidence(out: Path, text: str, stage: str = "s1") -> Path:
+    """直接写证据日志（用于构造特殊内容）。"""
+    log = out / "evidence" / f"{stage}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(text, encoding="utf-8")
+    return log
 
 
 def test_d_cell_blocks_without_test_cmd(tmp_path):
@@ -463,7 +472,7 @@ def test_rerun_current_cell_does_not_warn(tmp_path, capsys):
     capsys.readouterr()
 
     main(["s5", str(repo), "--plan", str(plan), "--out", str(out), "--cell", "a"])
-    assert "WARNING" not in capsys.readouterr().err
+    assert "强制跳到" not in capsys.readouterr().err
     assert json.loads((out / "state.json").read_text())["forced"] is False
 
 
@@ -481,3 +490,122 @@ def test_a_instruction_lists_external_deps_explicitly(tmp_path):
     assert "R1 在本阶段**降级**" in text
     assert "torch" in text and "numpy" in text
     assert "external" in text
+
+
+# ────────────── ① A 格 create-file 自动推断（2026-10-11 决定，决策 6） ──────────────
+
+
+def test_a_cell_allows_creating_a_new_file(tmp_path):
+    """① 新建文件（git 未跟踪、磁盘也没有）不产 missing 行 → A 格通过。
+
+    判据用 git 事实自动推断，不靠 plan 作者声明 creates ——
+    否则「补 pyproject.toml」这类最先该帮上忙的任务会被自己的门禁卡死。
+    """
+    repo = setup_repo(tmp_path)  # 已有 src/acme/core.py
+    plan = write_plan(tmp_path, writes=["pyproject.toml"], forbidden_paths=["src/"])
+    out = tmp_path / "out"
+
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) == 0  # 渲染 A
+    text = (out / "steps" / "s1.A.md").read_text(encoding="utf-8")
+    assert "（文件不存在或语法错误）" not in text  # 不再把"待创建的目标"当缺失依赖
+
+    # 再跑一次：A 检查点应通过 → 推进到 B
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) == 0
+    assert cell_of(out) == "B"
+
+
+def test_a_cell_still_blocks_when_target_has_syntax_error(tmp_path):
+    """① 反向：目标存在但语法错误 → 仍产 missing 行并拦下（别把真问题也放过）。"""
+    repo = setup_repo(tmp_path, {"src/acme/broken.py": "def broken(:\n    pass\n"})
+    plan = write_plan(tmp_path, writes=["src/acme/broken.py"])
+    out = tmp_path / "out"
+
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
+    text = (out / "steps" / "s1.A.md").read_text(encoding="utf-8")
+    assert "（文件不存在或语法错误）" in text
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) != 0
+    assert cell_of(out) == "A"
+
+
+# ────────────── ② D 格按命令类型定证据要求（2026-10-11 决定） ──────────────
+
+
+def test_d_lint_command_only_needs_exit_zero(tmp_path):
+    """② lint 类命令：只要退出码 0，不需要用例数（不加 --expect，判据来自命令）。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out, cmd="ruff check .")
+    write_raw_evidence(out, "All checks passed!\nRP_EXIT_CODE=0\n")
+
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) == 0
+    assert cell_of(out) == "E"
+
+
+def test_d_lint_command_still_blocks_on_nonzero_exit(tmp_path):
+    """② 反向：lint 类命令退出码非 0 → 拦下。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out, cmd="mypy src")
+    write_raw_evidence(out, "src/x.py:1: error: bad\nRP_EXIT_CODE=1\n")
+
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) != 0
+    assert cell_of(out) == "D"
+
+
+def test_d_generic_command_needs_an_output_line(tmp_path):
+    """② 普通命令：只有退出码、没有输出 → 不算证据。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out, cmd="python tools/validate.py")
+    write_raw_evidence(out, "RP_EXIT_CODE=0\n")
+
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) != 0
+    assert cell_of(out) == "D"
+
+
+def test_d_generic_command_passes_with_output(tmp_path):
+    """② 反向：普通命令退出码 0 + 有输出 → 通过并推进。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out, cmd="python tools/validate.py")
+    write_raw_evidence(out, "validating...\nOK\nRP_EXIT_CODE=0\n")
+
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) == 0
+    assert cell_of(out) == "E"
+
+
+def test_d_instruction_renders_command_specific_requirement(tmp_path):
+    """② 指令块要渲染**这条命令**的证据要求，而不是写死的"用例数"。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out, cmd="ruff check .")
+    text = (out / "steps" / "s1.D.md").read_text(encoding="utf-8")
+
+    assert "只要退出码为 0" in text
+    assert "用例数汇总行" not in text  # 不再对 lint 命令要求用例数
+
+
+# ────────────── ③ done 消息如实描述四格 ──────────────
+
+
+def test_done_message_lists_all_four_cells(tmp_path, capsys):
+    """③ 收尾消息要说 A → B → D → E，不能漏掉 D（旧实现写死"A → B → E"）。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out)
+    write_evidence(out)
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # → E
+    state = json.loads((out / "state.json").read_text())
+    for path in state["e_expected"][0]["paths"]:
+        git(["add", path], repo)
+    git(["commit", "-q", "-m", state["e_expected"][0]["subject"]], repo)
+
+    capsys.readouterr()
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) == 0
+    assert "A → B → D → E 全部通过" in capsys.readouterr().out
