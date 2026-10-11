@@ -72,7 +72,14 @@ def run(
     # 切到另一个阶段时清掉上一阶段的格进度，否则 current_cell 会串台
     # （多阶段计划的 per-stage 状态留到阶段 2 的驱动循环再细化）
     if state.get("current_stage") not in (None, stage.id):
-        for key in ("current_cell", "create_targets", "a_fingerprint", "e_expected", "e_rev_count"):
+        for key in (
+            "current_cell",
+            "create_targets",
+            "a_fingerprint",
+            "e_expected",
+            "e_rev_count",
+            "test_cmd",
+        ):
             state.pop(key, None)
         state["forced"] = False
         state["current_stage"] = stage.id
@@ -111,7 +118,7 @@ def run(
         # "重发 D 格指令"（14.9 ②）：指令块要按**当前**命令重渲染，
         # 否则会停在旧命令上（改了 --test-cmd 之后尤其明显）
         if requested == "D":
-            cmd = test_cmd or state.get("test_cmd")
+            cmd = test_cmd or stage.accept_cmd or state.get("test_cmd")
             if cmd:
                 _rerender_d(scan, stage, root, out_dir, cmd, notes)
         return _blocked(stage, requested, gate["reason"], gate, notes)
@@ -139,9 +146,9 @@ def run(
             )
         requested, gate, advanced = nxt, None, True
 
-    # 前置条件 2：D 格没有可用 test_cmd → 不许静默跳过（14.9 第 3 条）
-    # 注意位置：必须在"可能被推进到 D"之后判，否则 B 通过顺带渲染 D 时会漏检
-    effective_cmd = test_cmd or state.get("test_cmd")
+    # 前置条件 2：D 格没有可用验收命令 → 不许静默跳过（14.9 第 3 条）
+    # 命令优先级：--test-cmd（人显式给）> stage.accept_cmd（plan 带的、作用域=本次改动）> state
+    effective_cmd = test_cmd or stage.accept_cmd or state.get("test_cmd")
     if requested == "D" and not effective_cmd:
         state["needs_manual_acceptance"] = True
         _save_state(out_dir, state)
@@ -399,27 +406,31 @@ def _gate_e(state: dict, root: Path) -> dict:
             "dirty": dirty,
             "mismatch": mismatch,
         }
-    retyped = [
-        {"expected": want, "actual": got}
-        for want, got in pairs
-        if want != got  # 只有类型不同（scope 与描述一致）
+    overrides = [
+        {"from": _type_of(want), "to": _type_of(got)} for want, got in pairs if want != got
     ]
+    if overrides:
+        state["e_type_override"] = overrides  # 留痕：谁把 type 改成了什么
     reason = f"E 格通过：{len(expected)} 条提交与工具生成的一致"
-    if retyped:
-        reason += "（其中 " + str(len(retyped)) + " 条仅 type 不同，已按人工覆盖接受）"
+    if overrides:
+        reason += f"（{len(overrides)} 条 type 被人工覆盖：{overrides}）"
     return {
         "passed": True,
         "reason": reason,
         "dirty": [],
-        "retyped": retyped,
+        "e_type_override": overrides,
     }
 
 
-def _subject_ok(want: str, got: str) -> bool:
-    """R6 的比对口径：**逐字一致**；唯一允许的差异是开头的 **type**（含 scope 必须一致）。
+# R6 允许人工改 type，但**只能在约定白名单里改**（不许填 wip/update 之类）
+ALLOWED_TYPES = ("feat", "fix", "refactor", "chore", "docs", "test", "build", "ci")
 
-    理由：工具按路径推断 type，判不了语义（14.12）；E 块据此明确提示"修复类改动可自行改
-    为 fix"。既然让改，就不能反过来判它不一致。
+
+def _subject_ok(want: str, got: str) -> bool:
+    """R6 的比对口径：**逐字一致**；唯一允许的差异是开头的 **type**（scope 与描述须一致）。
+
+    理由：工具按路径推断 type，判不了语义（14.12）；E 块据此提示"修复类改动可自行改为
+    fix"。既然让改，就不能反过来判它不一致 —— 但**改后的 type 必须在白名单内**。
     """
     if want == got:
         return True
@@ -427,7 +438,15 @@ def _subject_ok(want: str, got: str) -> bool:
     g_head, g_sep, g_tail = got.partition(":")
     if not (w_sep and g_sep):
         return False
-    return _scope_of(w_head) == _scope_of(g_head) and w_tail == g_tail
+    if _scope_of(w_head) != _scope_of(g_head) or w_tail != g_tail:
+        return False
+    return _type_of(got) in ALLOWED_TYPES
+
+
+def _type_of(subject: str) -> str:
+    """取 subject 的 type token（`feat(k02): x` → `feat`）。"""
+    head = subject.partition(":")[0]
+    return head.split("(", 1)[0].strip()
 
 
 def _scope_of(head: str) -> str:

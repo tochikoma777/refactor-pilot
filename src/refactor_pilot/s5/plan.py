@@ -32,6 +32,7 @@ class Stage:
     writes: tuple[str, ...]
     forbidden_paths: tuple[str, ...]
     behavior_spec: str
+    accept_cmd: str | None = None  # D 格的验收命令（缺省时可由 --test-cmd 覆盖）
 
 
 def load(path: str | os.PathLike[str]) -> Stage:
@@ -98,12 +99,17 @@ def _to_stage(stage: object, index: int) -> Stage:
         for value in values:
             _validate_relative(group, value)
 
+    accept = stage.get("accept_cmd")
+    if accept is not None and (not isinstance(accept, str) or not accept.strip()):
+        raise PlanError(f"{where}.accept_cmd 必须是非空字符串（或省略）")
+
     return Stage(
         id=str(stage["id"]),
         type=str(stage["type"]),
         writes=writes,
         forbidden_paths=forbidden,
         behavior_spec=behavior,
+        accept_cmd=accept,
     )
 
 

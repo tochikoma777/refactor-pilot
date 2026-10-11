@@ -221,7 +221,9 @@ E_TEMPLATE = """# [{{project.name}}] 阶段 {{stage.id}} · E 格提交拆分（
 > subject 必须与上面**完全一致**（逐字比对，多一个空格都算不一致）；body 可自行补充说明。
 >
 > ⚠️ **type 由路径推断；若本次其实是修复类改动，请自行把 type 改为 `fix`。**
-> 工具判不了改动语义，故如实标注 —— 别把推断当结论。**除 type 外**其余部分必须逐字一致。
+> 只能从 `feat / fix / refactor / chore / docs / test / build / ci` 里选；
+> 工具判不了改动语义，故如实标注 —— 别把推断当结论。
+> **除 type 外**其余部分必须逐字一致（scope 与描述都不许动）。
 
 ## 提交后核对
 
@@ -238,8 +240,11 @@ D_TEMPLATE = """# [{{project.name}}] 阶段 {{stage.id}} · D 格实跑验收（
 ## 1. 跑这条命令（**由你执行，本工具不执行被测代码**）
 
 ```bash
-{ {{facts.test_cmd}} 2>&1; echo "RP_EXIT_CODE=$?"; } | tee {{facts.evidence_path}}
+cd {{project.path}} && { {{facts.test_cmd}} 2>&1; echo "RP_EXIT_CODE=$?"; } \
+  | tee {{facts.evidence_path}}
 ```
+
+> 验收**本次改动可用**即可，不是"全仓库达标"（存量问题另有阶段处理）。
 
 {{#if facts.test_cmd_is_suggested}}
 > ⚠️ 这条命令来自扫描的**建议值**（未经实跑验证）。
