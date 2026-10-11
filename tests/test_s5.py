@@ -609,3 +609,80 @@ def test_done_message_lists_all_four_cells(tmp_path, capsys):
     capsys.readouterr()
     assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) == 0
     assert "A → B → D → E 全部通过" in capsys.readouterr().out
+
+
+# ────────────── D-06 門禁模型：创建类任务（2026-10-11） ──────────────
+
+
+def _to_b(repo: Path, plan: Path, out: Path) -> None:
+    """渲染 A → 推进到 B（A 对创建类目标应通过）。"""
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) == 0  # A
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) == 0  # → B
+    assert cell_of(out) == "B"
+
+
+def test_b_cell_blocks_when_created_file_is_empty(tmp_path, capsys):
+    """D-06：创建类目标建成空文件 → B 格拦下（空壳不算完成）。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path, writes=["pyproject.toml"], forbidden_paths=["src/"])
+    out = tmp_path / "out"
+    _to_b(repo, plan, out)
+
+    (repo / "pyproject.toml").write_text("", encoding="utf-8")
+
+    capsys.readouterr()
+    rc = main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
+    assert rc != 0
+    assert cell_of(out) == "B"
+    assert "空文件" in capsys.readouterr().out
+
+
+def test_b_cell_blocks_when_create_target_missing(tmp_path):
+    """D-06：创建类目标压根没建 → B 格拦下。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path, writes=["pyproject.toml"], forbidden_paths=["src/"])
+    out = tmp_path / "out"
+    _to_b(repo, plan, out)
+
+    rc = main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # 什么都没建
+    assert rc != 0
+    assert cell_of(out) == "B"
+
+
+def test_b_cell_passes_when_created_file_has_content(tmp_path):
+    """D-06 反向：创建类目标已建且非空 → B 通过并推进。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path, writes=["pyproject.toml"], forbidden_paths=["src/"])
+    out = tmp_path / "out"
+    _to_b(repo, plan, out)
+
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+
+    rc = main(["s5", str(repo), "--plan", str(plan), "--out", str(out),
+               "--test-cmd", "pytest -q"])
+    assert rc == 0
+    assert cell_of(out) == "D"
+
+
+def test_create_targets_recorded_at_a(tmp_path):
+    """D-06：创建类目标在 A 格记录（不在 git 跟踪里的 writes）。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path, writes=["pyproject.toml"], forbidden_paths=["src/"])
+    out = tmp_path / "out"
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
+
+    state = json.loads((out / "state.json").read_text())
+    assert state["create_targets"] == ["pyproject.toml"]
+
+
+def test_commit_type_inference_table():
+    """D-06 的 commit_type 推断表。"""
+    from refactor_pilot import s5
+
+    assert s5._commit_type("pyproject.toml") == "build"
+    assert s5._commit_type("requirements-dev.txt") == "build"
+    assert s5._commit_type(".github/workflows/ci.yml") == "ci"
+    assert s5._commit_type(".gitignore") == "chore"
+    assert s5._commit_type(".pre-commit-config.yaml") == "chore"
+    assert s5._commit_type("tests/test_foo.py") == "test"
+    assert s5._commit_type("src/acme/core.py") == "chore"
