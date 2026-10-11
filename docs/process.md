@@ -44,11 +44,12 @@
 - **已完成**：**R6 两道护栏**（type 白名单 + `e_type_override` 留痕，P-28）+ **阶段 2**：`refactor-pilot upgrade` 单命令驱动循环，且 **D 格验收作用域 = 本次改动可用**（P-29 / `design-v2.md` 14.14）
 - **已完成**：**阶段 3 端到端**：3a v1 clone 跑完 4 个阶段（缺失型 4/5 关，B01 设计性跳过，**新冒出 G05**）；3b refactor-pilot clone 跑通并**闭环自证**（补 CI 后 C06 消失）。两个数：**人被问 2 次**（两个项目各 1 次，均为 C06 无 stdlib YAML 校验器）。见 `design-v2.md` 14.15
 - **已完成**：**阶段 3 复盘四条修复**（P-30 / `design-v2.md` 14.15.1）：重规划封顶 / 每条 finding 不得静默 / G03 豁免 / YAML 候选清单 / skipped 交接。**验证时又抓 3 个真 bug**（未跟踪目录折叠、非 Python 目标伪 missing、进度分母）
+- **已完成**：**B01 交接包**（P-31 / `design-v2.md` 14.16）：工具生成测试骨架（机械部分）交 AI 填断言。**v1 上 0 候选（脚本型，导入即副作用）→ 如实交接，未放宽 D 判据**
 - **已冻结的方向**：不再扩张 S2 规则（无验证材料，边际收益趋近零）；不做 S4 规划算法、问卷、完整七格状态机；**语义重构暂不纳入**（第一版只做工程化补课）
-- **质量门**：`ruff` / `mypy` 全绿 · `pytest 117 passed`
+- **质量门**：`ruff` / `mypy` 全绿 · `pytest 119 passed`
 - **规则库现状**：v1 召回 5/5（**全是缺失型送分题**，10.7 早已预警）· 自审计误报 1 条（C06 真问题）
 - **待你确认**：无
-- **下一步**：待定（阶段 3 与复盘修复已闭环；下一刀方向由你定）
+- **下一步**：B01 端到端闭环需一个**有可导出函数的正常包项目**（等用户给路径）；v1 已判定为不适用
 - **技术债**：D-02、D-06 均已还清；余下 D-03（C 格）、D-04（F 格）、D-05（R2 反向查）。**多阶段 per-stage 独立状态**仍用"切阶段清进度"近似（4+ 阶段实测**未串台**）
 
 ---
@@ -422,6 +423,19 @@
 - **防回归**：`test_every_finding_is_stage_or_skipped`、`test_g03_exempts_tests_and_examples`、
   `test_upgrade_done_report_lists_skipped_handoff`、`test_upgrade_replan_cap_reports_pending`、
   `test_a_cell_allows_non_python_target`、`test_untracked_new_directory_is_in_scope`
+
+### P-31 · B01 交接包：测试骨架（机械部分）+ AI 填断言
+
+- **结论**（用户设计）：B01 不再只"交接出去" —— 工具生成测试骨架（tests/ 结构 + `conftest.py` +
+  按模块推导的测试文件/函数签名 + `TODO(AI)`），AI 填断言；**工具不编造断言**。
+  D 格验收 `python -m pytest -q tests`：退出码 0 **且用例数 > 0**，判据不放宽
+- **机械规则**（保守，宁可少生成）：排除 `tests/`/`__init__`、**无第三方依赖（含传递）**、
+  **导入安全**（顶层仅 docstring/常量/import/def/class/`__main__` guard）、至少一个公共符号
+- **v1 结果（如实）**：无第三方依赖的模块**全部导入即执行副作用**
+  （`get_raw_data` 联网下载、`read_raw_data` 读文件、`hello_world` print）→ **0 候选 → 带原因 skipped**。
+  用户验收①「v1 关闭 B01」**未达成**；验收②「如实报告、不放宽 D 判据」**遵守**
+- **条款**：`design-v2.md` 14.16
+- **防回归**：`test_b01_generates_skeleton_for_safe_modules`、`test_b01_skips_side_effecting_modules`
 
 ---
 
