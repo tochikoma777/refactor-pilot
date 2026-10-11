@@ -117,7 +117,7 @@ def test_line_na_exemption_is_a_closed_list():
 
     assert LINE_NOT_APPLICABLE == {
         "B01", "C01", "C02", "C04", "C06", "G05",  # 缺失型
-        "G01", "G02", "G07",                        # 整文件型
+        "B02", "G01", "G02", "G07",                 # 整文件型
     }, "清单被改动过？那必须在 commit message 里写明理由"
 
     factory = FindingFactory(Rules.default())
@@ -415,7 +415,11 @@ def test_a03_stub_referenced_by_real_code(tmp_path):
 
 
 def test_b02_test_file_without_assert(tmp_path):
-    """B02：测试文件存在但无断言。"""
+    """B02：测试文件存在但无断言。
+
+    **故意失败**守卫（14.10）：B02 是整文件型，`line=0` 是"不适用"，
+    不得被降级 unverified。若有人把它移出 `LINE_NA_RULES`，本用例立刻失败。
+    """
     repo = make_repo(
         tmp_path / "repo",
         {
@@ -424,7 +428,10 @@ def test_b02_test_file_without_assert(tmp_path):
         },
     )
     _, payload = audit(repo, out=tmp_path / "out")
-    assert "B02" in rules_of(payload)
+    b02 = [f for f in payload["findings"] if f["rule"] == "B02"]
+    assert b02, "B02：测试文件存在但无断言 —— 未报出"
+    assert all(f["severity"] == "major" for f in b02), "B02 是整文件型，不该被降级 unverified"
+    assert all(f["confidence"] != "low" for f in b02), "被降级时 confidence 会变 low"
 
 
 def test_b04_module_level_skip(tmp_path):

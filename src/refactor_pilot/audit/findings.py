@@ -41,7 +41,10 @@ from .rules import UNVERIFIED, Rules
 MISSING_TYPE_RULES = frozenset({"B01", "C01", "C02", "C04", "C06", "G05"})
 
 # 判"整个文件/目录"（非缺失型，但对象仍不是某一行）
-LINE_NA_RULES = frozenset({"G01", "G02", "G07"})
+# B02（测试文件整文件无断言）的判据就是"整个文件没有 assert"，天然是整文件型，
+# 不是"实现者懒得找行号" —— 与 G 组同性质。若不归此清单，会被降级 unverified
+# → 不计入 blocker 分量、进不了 plan，工具发现了真问题却被降级机制吞掉。
+LINE_NA_RULES = frozenset({"B02", "G01", "G02", "G07"})
 
 LINE_NOT_APPLICABLE = MISSING_TYPE_RULES | LINE_NA_RULES
 
