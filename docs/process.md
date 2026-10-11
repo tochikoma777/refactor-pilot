@@ -38,13 +38,14 @@
 - **更新于**：2026-10-11 · **提交**：见 `git log`（摘要不写死 SHA，否则它自己先过期）
 - **已完成**：第 1 步骨架/CLI/快照 · 第 2 步 S1 九字段族 · 第 3 步三段法基线（结论：v1 存在型正例耗尽，L1 维持 5 条缺失型）· 第 4 步 S2 审计器 + recall 核心
 - **已完成**：**S5 最小切片 + D 格**（A/B/D/E 四格）—— toy2 上用**真实 pytest** 走通全流程
-- **已完成**：**首次真实试验**（`/tmp/rp-toy-v1` 跑 K-02 补 pyproject.toml）暴露"创建类任务"边界 → 五处修复（P-21~P-23），结论入 `design-v2.md` 14.11
-- **已冻结的方向**：不再扩张 S2 规则（无验证材料，边际收益趋近零）；不做 S4 规划算法、问卷、完整七格状态机
-- **质量门**：`ruff` / `mypy` 全绿 · `pytest 94 passed`
+- **已完成**：**首次真实试验**（`/tmp/rp-toy-v1` 跑 K-02 补 pyproject.toml）暴露"创建类任务"边界 → 五处修复（P-21~P-23）
+- **已完成**：**D-06 门禁模型**（创建类任务：A 不产 missing / B 判已创建且非空 / **D 是真正守卫** / E 按表推断 type），见 `design-v2.md` 14.12
+- **已冻结的方向**：不再扩张 S2 规则（无验证材料，边际收益趋近零）；不做 S4 规划算法、问卷、完整七格状态机；**语义重构暂不纳入**（第一版只做工程化补课）
+- **质量门**：`ruff` / `mypy` 全绿 · `pytest 99 passed`
 - **规则库现状**：v1 召回 5/5（**全是缺失型送分题**，10.7 早已预警）· 自审计误报 1 条（C06 真问题）
-- **待你确认**：无（五处修复已批准并落地）
-- **下一步**：**等用户判断"创建类任务边界"意味着什么** —— 这是 S4/S5 完整版动工前必须先想清的问题（`design-v2.md` 14.11）
-- **技术债**：D-02（D 格 R4）**已还清**；余下 D-03（C 格）、D-04（F 格）、D-05（R2 反向查）、**D-06（创建类任务的门禁模型待定，S4/S5 前必须还）**
+- **待你确认**：无
+- **下一步**：**阶段 1 —— audit finding → plan 自动转换（S4-lite）**；之后 阶段 2（单命令驱动循环）、阶段 3（换 refactor-pilot clone 端到端验收）
+- **技术债**：D-02（D 格 R4）、**D-06（创建类任务门禁模型）** 均已还清；余下 D-03（C 格）、D-04（F 格）、D-05（R2 反向查）
 
 ---
 
@@ -332,6 +333,23 @@
   **静默没匹配上**。共同模式：**代码静默地没生效，测试却全过**
 - **条款**：`CODEBUDDY.md` 工程规矩一节
 
+### P-25 · D-06 门禁模型：创建类任务（用户直接定）
+
+- **结论**（用户裁定，规格见 `design-v2.md` 14.12）：创建类任务（`writes` 不在 git 跟踪里）
+  用一套换过的门禁 —— **A** 不产 `missing`、记 `create_targets`；**B** 判"已创建且非空"；
+  **D 是真正的守卫**：无可执行验收命令 → `needs_manual_acceptance` 阻塞；**E** `commit_type`
+  按路径表推断（`pyproject.toml`/`requirements*.txt`→`build`、`.github/workflows/*`→`ci`、
+  `.gitignore`/`.pre-commit-config*`→`chore`、`test_*.py`→`test`、其它→`chore`）
+- **理由**（用户）：R1/R2 在创建类任务上归零（试验已证实），唯一能防"AI 说做完了其实没做好"
+  的是 D 格，所以 D 格不能是可选；**防流水线走过场的关键就是这里**
+- **硬约束补充**（用户）：每个创建类 stage **必须能挂一条真实可执行的验收命令**；
+  挂不上即阻塞，**不许静默放行**
+- **条款**：`design-v2.md` 14.12
+- **防回归**：`test_b_cell_blocks_when_created_file_is_empty`（+非空则通过）、
+  `test_b_cell_blocks_when_create_target_missing`、`test_create_targets_recorded_at_a`、
+  `test_commit_type_inference_table`
+- **已知取舍**（如实）：`commit_type` 表只看路径不看语义，故"修改已有源码"会落入 `chore`
+
 ---
 
 ## 2.5 文档不一致登记
@@ -363,7 +381,7 @@
 | D-03 | C 格（R7 阈值实测）未实现 | 数值类改动没有实测阈值与余量 | 需要 Q6/阈值场景时 |
 | D-04 | F 格（R8/R9 push 与网络失败）未实现 | 推送到远端失败时无重试指引 | 需要发布流程时 |
 | D-05 | R2 的 D 格反向查（4.1，warn 不 block）未实现 | 新增顶层符号超出契约快照时无提示 | 随 D 格一起补 |
-| **D-06** | **创建类任务的门禁模型未定** | 对"新建文件"任务，R1/R2 无从发力，门禁目前只做了"放行 + 记录"；**边界含义未想清** | **S4/S5 完整版动工前必须定**（见 `design-v2.md` 14.11） |
+| ~~D-06~~ | ~~创建类任务的门禁模型未定~~ | ✅ **已还清**（2026-10-11）：模型已定（P-25 / `design-v2.md` 14.12）并实现 + 实测 | — |
 
 > ⚠️ **统计口径更正**：v1 的两条新增候选（G05、H01）经用户判定**都是误报，不入基线**。
 > 因此 **L1 仍是 5 条**，10.7 的分层加法维持 **5 + 2 + 10 = 17**，不改成 7。
@@ -492,6 +510,29 @@ A 格 → blocked：依赖闭合核对未通过：存在未实现的依赖（R1�
 未跟踪 / 嵌套四类混合下均正确 —— 与 `line[3:]` 那个 bug 属同类风险，**未复发**。
 
 `ruff` / `mypy` 全绿 · `pytest 94 passed`
+
+### D-06 门禁模型验收（2026-10-11）
+
+| 条款 | 用例 | 结论 |
+| ---- | ---- | ---- |
+| A 记 `create_targets` | `test_create_targets_recorded_at_a` | ✅ |
+| B 建空文件 → 拦下 | `test_b_cell_blocks_when_created_file_is_empty` | ✅ |
+| B 目标缺失 → 拦下 | `test_b_cell_blocks_when_create_target_missing` | ✅ |
+| B 已建非空 → 通过 | `test_b_cell_passes_when_created_file_has_content` | ✅ |
+| `commit_type` 推断表 | `test_commit_type_inference_table` | ✅ |
+| D 是真正守卫（不可执行命令即阻塞） | 既有 `test_d_cell_blocks_without_test_cmd` + 实测 | ✅ |
+
+**v1 clone 实测**（K-02 补 pyproject.toml，全程无强跳）：
+
+```
+A → B（state.create_targets = ['pyproject.toml']）
+写空文件         → B 拦下：「创建了空文件（D-06：新建的产物不能是空壳）」
+写非空内容       → B 通过 → D
+D 命令退出码非 0  → D 拦下（少了 requires-python，守卫生效）
+补全后 D 通过     → E：subject = build(k02): 更新 pyproject.toml
+```
+
+`ruff` / `mypy` 全绿 · `pytest 99 passed`
 
 ### S5 最小切片 · 第 14 节验收（2026-10-11）
 
