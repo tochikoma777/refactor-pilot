@@ -18,6 +18,7 @@ refactor-pilot audit <path> [--ref REF] [--out DIR] [--rules FILE] [--json]
 refactor-pilot recall --audit FILE --baseline FILE [--json] [--detail]
 refactor-pilot plan  <path> [--ref REF] [--out DIR] [--rules FILE] [--json]
 refactor-pilot s5    <path> --plan FILE [--out DIR] [--stage-id ID] [--cell {a,b,d,e}] [--test-cmd CMD]
+refactor-pilot upgrade <path> [--ref REF] [--out DIR] [--test-cmd CMD] [--cell {a,b,d,e}]
 ```
 
 退出码：`0` 成功（**发现问题不算错**）／`1` 运行时错误／`2` 用法错误／`3` 目标不支持。

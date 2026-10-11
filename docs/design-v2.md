@@ -1780,6 +1780,15 @@ src 布局若无打包声明，`from acme.schema import ...` 会被判 `external
 > 并**相应放宽 E 格判据**：允许**仅 type** 不同（`scope` 与描述仍须逐字一致）。
 > 既然让改，就不能反过来判它不一致。
 
+**两道护栏【必须遵守】**（2026-10-11 用户补）：
+
+1. **type 必须在白名单内**：`feat / fix / refactor / chore / docs / test / build / ci`。
+   允许人对语义，但**不许随便填** `wip` / `update` 之类
+2. **替换必须留痕**：记进 `state.e_type_override = [{"from": ..., "to": ...}, ...]`
+
+> `scope + 描述`仍须逐字一致 —— **R6 的内核（编号归属权）保住了**。type 是语义标签，
+> 工具判不了就交人，但要留痕，不要假装判得准。
+
 > ⚠️ 如实标注：推断**只看路径、不看改动语义**。语义分类是 S4 的活，本切片不做。
 
 ---
@@ -1816,3 +1825,44 @@ per-stage 的独立状态留到阶段 2 的驱动循环再细化。
 
 **验收**：v1 clone 上 `plan` 由 `audit.json` **全自动生成 4 个阶段**（C01/C02/C04/C06），零手改；
 S5 直接消费，`--stage-id` 可选中任一阶段。
+
+---
+
+## 14.14 阶段 2：单命令驱动循环（`upgrade`）
+
+> 目的：**人只给一次路径**。反复运行 `refactor-pilot upgrade <path>` 即逐格推进，直到全部阶段完成。
+
+**执行者仍是 AI，不是工具。** `upgrade` 每次运行只输出"当前该做什么"（一格指令块），
+AI 执行完再运行一次即推进。工具**仍不执行**被测代码 / git 写操作（"指挥官模式"不变）。
+
+**流程**：首次运行内部跑 `scan → audit → plan`（缺 plan.json 时）；之后按
+`state.done_stages` 选第一个未完成阶段，调用 S5 走一格；阶段 E 通过后计入 `done_stages`，
+下次运行自动进入下一阶段；全部完成则报 `全部 N 个阶段已完成`。
+
+### D 格验收命令的**作用域【必须遵守】**
+
+> **验收"本次改动可用"，不是"全仓库达标"。**
+
+阶段 1 生成的 `ruff.toml` / `ci.yml` 这类配置文件，若用**全仓库**命令验收必然失败 ——
+目标项目本来就有存量 lint 债务（`ruff check .` 不可能 0 错误）。**存量清零是独立的另一类阶段**
+（Q4 / 存量清理三刀切），**不是"创建配置文件"的验收项**。两者混在一起，阶段 3 会全线阻塞。
+
+因此 autoplan 为创建类阶段自带 `accept_cmd`，**作用域锁死在本产物**：
+
+| 阶段 | accept_cmd 验什么 |
+| ---- | ----------------- |
+| C01 `pyproject.toml` | 能被 TOML 解析，且 `project.name` / `project.version` 存在 |
+| C02 `ruff.toml` | **能被解析**（"配置可加载"），**不是** `ruff check .` 全仓库达标 |
+| C04 `CODEBUDDY.md` | 非空且含标题 |
+| G05 `.gitignore` | 含至少一条规则行 |
+| C06 `ci.yml` | **无 accept_cmd** —— 无 stdlib YAML 校验器，**不编造**命令，交人工给（演示 D 格守卫） |
+
+**命令优先级**：`--test-cmd`（人显式给）> `stage.accept_cmd`（plan 带的）> `state.test_cmd`。
+三者皆无 → `needs_manual_acceptance` 阻塞。
+
+**验收**（v1 clone，单命令驱动）：
+```
+upgrade → A(c01) → upgrade → B → 实现 → upgrade → D(用 accept_cmd，无需 --test-cmd)
+→ 执行 D 命令 → upgrade → E → 提交 → upgrade → 「阶段 c01 完成（1/4）」
+→ upgrade → 自动进入 c02
+```

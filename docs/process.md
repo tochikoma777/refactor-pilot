@@ -41,12 +41,13 @@
 - **已完成**：**首次真实试验**（`/tmp/rp-toy-v1` 跑 K-02 补 pyproject.toml）暴露"创建类任务"边界 → 五处修复（P-21~P-23）
 - **已完成**：**D-06 门禁模型**（创建类任务：A 不产 missing / B 判已创建且非空 / **D 是真正守卫** / E 按表推断 type），见 `design-v2.md` 14.12
 - **已完成**：**commit_type 创建/修改分流**（P-26）+ **阶段 1**：`refactor-pilot plan` 把 audit 缺失型 finding 自动转成 plan（P-27 / `design-v2.md` 14.13）
+- **已完成**：**R6 两道护栏**（type 白名单 + `e_type_override` 留痕，P-28）+ **阶段 2**：`refactor-pilot upgrade` 单命令驱动循环，且 **D 格验收作用域 = 本次改动可用**（P-29 / `design-v2.md` 14.14）
 - **已冻结的方向**：不再扩张 S2 规则（无验证材料，边际收益趋近零）；不做 S4 规划算法、问卷、完整七格状态机；**语义重构暂不纳入**（第一版只做工程化补课）
-- **质量门**：`ruff` / `mypy` 全绿 · `pytest 106 passed`
+- **质量门**：`ruff` / `mypy` 全绿 · `pytest 110 passed`
 - **规则库现状**：v1 召回 5/5（**全是缺失型送分题**，10.7 早已预警）· 自审计误报 1 条（C06 真问题）
 - **待你确认**：无
-- **下一步**：**阶段 2 —— 单命令驱动循环**（`upgrade`：scan→audit→plan→逐阶段推进，AI 只执行工具发出的命令）；之后 阶段 3（换 refactor-pilot clone 端到端验收）
-- **技术债**：D-02（D 格 R4）、**D-06（创建类任务门禁模型）** 均已还清；余下 D-03（C 格）、D-04（F 格）、D-05（R2 反向查）。**新增待办**：多阶段 per-stage 独立状态（当前用"切阶段清进度"近似，阶段 2 细化）
+- **下一步**：**阶段 3 —— 换 refactor-pilot 的 clone（`/tmp/rp-toy-self`）端到端验收**，报两个数：① 人被问几次（目标：只有开头给路径）② 缺失型 finding 是否全关掉
+- **技术债**：D-02、D-06 均已还清；余下 D-03（C 格）、D-04（F 格）、D-05（R2 反向查）。**多阶段 per-stage 独立状态**仍用"切阶段清进度"近似
 
 ---
 
@@ -376,6 +377,32 @@
 - **防回归**：`tests/test_autoplan.py`（映射/去重/跳过/可加载）、
   `test_switching_stage_resets_cell`
 
+### P-28 · R6 放宽的两道护栏：type 白名单 + 留痕
+
+- **结论**（用户裁定）：认可"仅 type 可不同"，但补两道护栏 ——
+  ① **type 必须在白名单内**（`feat/fix/refactor/chore/docs/test/build/ci`），不许填 `wip`/`update`；
+  ② **替换留痕**：`state.e_type_override = [{"from":..., "to":...}]`
+- **理由**（用户）：允许人对语义，但不能让人随便填；**scope + 描述仍逐字一致 —— R6 的内核
+  （编号归属权）保住了**。type 是语义标签，工具判不了就交人，但要留痕，不要假装判得准
+- **顺带**：把"E 块提示可改 type vs E 格逐字校验"这处**两条指令互相打架**记进
+  `CODEBUDDY.md` 的工程规矩（同属"静默失效"）
+- **条款**：`design-v2.md` 14.12
+- **防回归**：`test_e_cell_rejects_non_whitelist_type`、`test_e_cell_records_type_override`
+
+### P-29 · 阶段 2：`upgrade` 单命令驱动循环 + D 格验收作用域
+
+- **结论**（用户确认进入阶段 2，并提前给出 D 格作用域约束）：
+  ① 新增 `refactor-pilot upgrade <path>` —— 反复运行即逐格推进到全部阶段完成；
+  首次自动 scan+audit+plan；按 `state.done_stages` 选下一个未完成阶段。
+  **执行者仍是 AI**（工具不执行被测代码/git 写）
+  ② **D 格验收作用域【必须遵守】：验收"本次改动可用"，不是"全仓库达标"**。
+  autoplan 为创建类阶段自带 `accept_cmd`（作用域锁死在本产物）；C06 无 stdlib YAML 校验器 →
+  **不编造命令**，留人工给（演示守卫）。命令优先级 `--test-cmd` > `accept_cmd` > `state.test_cmd`
+- **理由**（用户）：阶段 1 生成的 `ruff.toml`/`ci.yml` 若用全仓库命令验收必然失败（存量 lint 债务），
+  而**存量清零是独立的另一类阶段**，不是"创建配置文件"的验收项；两者混在一起，阶段 3 会全线阻塞
+- **条款**：`design-v2.md` 14.14
+- **防回归**：`test_accept_cmd_flows_into_d_instruction`、`test_upgrade_drives_and_marks_stages_done`
+
 ---
 
 ## 2.5 文档不一致登记
@@ -581,6 +608,20 @@ $ refactor-pilot s5 … --stage-id nope                  → 报错并列出可�
 
 `commit_type`：创建类 `pyproject.toml`→`build`；修改类 `src/…py`→`feat`；
 E 格接受"仅 type"差异（scope 与描述仍逐字一致）。
+
+### 阶段 2（upgrade 驱动循环）+ R6 护栏验收（2026-10-11）
+
+单测 `110 passed`。真机（`/tmp/rp-toy-v1`，**单命令驱动**，工具全程未执行被测代码/git 写）：
+
+```
+upgrade → A(c01) → upgrade → B → 实现 pyproject.toml
+→ upgrade → D（用 plan 的 accept_cmd，**未给 --test-cmd**）
+→ 执行 D 命令：OK pyproject.toml：可解析且含 name/version（本次改动可用） / RP_EXIT_CODE=0
+→ upgrade → E（subject=build(c01)…）→ 提交 → upgrade → 「阶段 c01 完成（1/4）」
+→ upgrade → 自动进入 c02 · A 格
+```
+
+R6 护栏：type=`wip` → 拦下；type=`fix`（白名单内）→ 通过，且 `state.e_type_override=[{from:feat,to:fix}]`。
 
 ### S5 最小切片 · 第 14 节验收（2026-10-11）
 
