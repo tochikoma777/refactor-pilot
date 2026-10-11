@@ -1,3 +1,7 @@
+# CODEBUDDY.md
+
+This file provides guidance to CodeBuddy Code when working with code in this repository.
+
 # refactor-pilot · 会话入口
 
 > 本文件只是**入口指针**。权威设计文档是 [`docs/design-v2.md`](docs/design-v2.md)，
@@ -21,6 +25,27 @@
 - [ ] 记忆（`MEMORY.md` 索引）里没有被推翻的结论（改过方向、已完成却还写"待做"）
 - [ ] `ruff check . && mypy && pytest -q` 全绿（**改动前先确认基线是绿的**）
 
+## 常用命令
+
+```bash
+source .venv/bin/activate          # 所有命令都在仓库内 .venv 里跑（Python 3.13）
+
+ruff check .                       # lint：line-length 100，规则 E/F/W/I
+mypy                               # 类型检查：只看 src/，strict=false
+pytest -q                          # 全量测试（当前 119 passed）
+
+pytest tests/test_scan.py                      # 单个测试文件
+pytest tests/test_scan.py::test_toolchain_all_null_with_reason_when_no_config  # 单个用例
+pytest -k "gate or toolchain"                  # 按名字筛
+```
+
+- **测试无需安装包即可跑**：`conftest.py` 把 `src/` 插进 `sys.path`（src 布局，见 12.8）。
+  要装则 `pip install -e ".[dev]"`（dev extra 声明了 pytest/ruff/mypy）。
+- 改动前先确认基线全绿：`ruff check . && mypy && pytest -q`。
+- 跑工具自身：`python -m refactor_pilot <子命令>`，或装好后的 `refactor-pilot <子命令>`。
+- `tests/test_readonly.py` 是只读专项测试：扫完断言目标仓库 `git status` 干净 +
+  全文件指纹不变 —— 改动文件访问层时它最先炸。
+
 ## 硬约束（违反即停手）
 
 - **只读**：全项目唯一的写入口是 `src/refactor_pilot/outdir.py`；文件访问层 `fsutil` 只导出读 API（12.1）
@@ -34,6 +59,66 @@
 - **S5 链路已实现**：A/B/D/E 四格 + `plan`（finding→阶段）+ `upgrade`（单命令驱动循环）+
   B01 测试骨架交接包（`design-v2.md` 第 14 节，14.11–14.16）。
   **当前方向与验收口径以 `docs/process.md` 顶部"原始需求 + 三门"为准** —— 那里【不可由后续讨论覆盖】
+
+## 代码架构
+
+### 数据流水线（全部从 `cli.py` 出发，串行）
+
+```
+argparse → snapshot.create() → scan.collect_all() → audit.collect_all()
+        → ├─ recall.run()                     （召回率自检）
+          ├─ autoplan.build() → plan.json     （缺失型 finding → 阶段）
+          └─ s5.run() / upgrade 驱动循环       （A/B/D/E 逐格推进）
+```
+
+`scan` / `audit` / `plan` / `upgrade` 都复用 `cli._build_scan()`（cli.py:193），
+**scan.json 只有一个产出源** —— 这样"人读输出"与 `--json`、以及各子命令之间不会各算各的（12.10）。
+
+### 三条"只读"是结构保证，不是约定
+
+- `fsutil.py` **只导出读 API**，扫描链路拿不到写函数（12.1）
+- `outdir.py` 是**全项目唯一写入口**；产物默认落仓库外 `./refactor-pilot-out/<项目名>/.upgrade/`（9.5）
+- `gitutil.py` 默认**拒绝写子命令**（`WRITE_SUBCOMMANDS` 白名单，gitutil.py:17）；
+  唯一例外是 snapshot 建/删 worktree，须显式 `allow_write=True`
+
+所有模块必须守住的两个位置概念（12.7）：
+`root` = 快照目录，**文件内容**从这扫；`source` = 源仓库，**git 事实**从这采
+（archive 快照里没有 `.git`，混用会得到一片 null）。
+
+### S1 / S2 是硬边界
+
+- `scan/`（S1）**只采集事实**，产出里不得出现规则 ID（12.2）。九个字段族：
+  `lang / layout / vcs / constraints / hooks / signals(q6) / q2_candidates / import_graph / toolchain`，
+  由 `scan/__init__.py::collect_all` 组装。
+- `audit/`（S2）**才做判定**。每个子模块就是一组规则：
+  `stubs`=A · `deps`=A · `testing`=B · `config`=C · `hygiene`=G · `contracts`=I；
+  再经 `suppress.apply()` 施加 7.4 抑制边，`report.render()` 出 `audit.md`。
+  `audit/rules.py` 是规则注册表（`Rules.default()` + `--rules FILE` 覆盖）。
+  规则定义**先改设计文档 7.2 那张表，实现排后面**。
+
+### S5：格模型与"指挥官模式"
+
+`s5/plan.py` 定义 `Stage`；`s5/__init__.py::run()` 每次调用**最多推进一格**（A→B→D→E）。
+
+- 检查点 `_gate_a/_gate_b/_gate_d/_gate_e` 各自读**事实**判过不过：
+  A=依赖闭合+零改动（指纹）· B=改动全落在 `stage.writes` 内且创建类非空 · D=读 evidence 日志的退出码/用例数 · E=提交数+subject 逐字一致
+- `s5/render.py` 渲染指令块（模板里有**未解析占位符就拒绝输出**，6.2）
+- **工具不执行被测代码、也不执行 git 写操作**：只生成命令/指令块 → AI/人执行 →
+  工具下次运行**读证据**判定（14.9）。`--exec-probe` 默认 off。
+- `upgrade`（cli.py:373）是单命令驱动循环：反复运行即逐阶段推进；全 `done` 后还会
+  **重规划**一次（跨阶段副作用，封顶 3 轮）；每条 finding 三选一：进 stages / 进 skipped / 不静默。
+
+### 产物与状态文件
+
+`scan.json` · `audit.json` · `plan.json` · `state.json` · `audit.md` · `evidence/`（14.9 的证据日志）。
+契约骨架见 `model.py`（scan/audit 顶层）；`state.json` 记当前阶段/格、`forced`、`needs_manual_acceptance` 等。
+
+### 测试与基线
+
+- `tests/helpers.py::make_repo` 合成一次性 git 仓库，是绝大多数用例的夹具底座
+- `tests/fixtures/verify_recipes/` 是**基线三段法**的窄查询脚本（`first_*` 用 scan.json 当索引、
+  `indep_*` 完全独立实现），`python run_all.py <target> <scan.json>` 跑；
+  基线由人确认，**不自己生成基线条目**（见协作口径）
 
 ## 规则
 
