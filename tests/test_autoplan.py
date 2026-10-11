@@ -22,10 +22,11 @@ def test_build_maps_missing_type_findings_to_stages():
     assert writes["c06"] == [".github/workflows/ci.yml"]
 
 
-def test_build_dedupes_and_skips_manual_rules():
+def test_build_dedupes_and_skips_b01_without_scan():
     payload = autoplan.build(_audit(["C01", "C01", "B01"]))
     assert [s["id"] for s in payload["stages"]] == ["c01"]
-    assert payload["skipped"] == [{"rule": "B01", "reason": autoplan.MANUAL_RULES["B01"]}]
+    assert [i["rule"] for i in payload["skipped"]] == ["B01"]
+    assert payload["skipped"][0]["reason"]  # 带原因
 
 
 def test_build_ignores_unmapped_rules():
@@ -72,3 +73,45 @@ def test_yaml_validator_candidates_shape():
     for candidate in facts.yaml_validator_candidates(target):
         assert candidate["parser"]
         assert target in candidate["cmd"]
+
+
+# ────────────── B01 测试骨架（机械部分） ──────────────
+
+
+def _scan(mods: dict[str, str]) -> dict:
+    return {
+        "layout": {"modules": mods},
+        "import_graph": {"unresolved_imports": [], "edges_internal": {}},
+    }
+
+
+def test_b01_generates_skeleton_for_safe_modules(tmp_path):
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "pkg" / "core.py").write_text(
+        "def add(a, b):\n    return a + b\n\n\nclass Thing:\n    pass\n", encoding="utf-8"
+    )
+    scan = _scan({"pkg": "pkg/__init__.py", "pkg.core": "pkg/core.py"})
+
+    payload = autoplan.build(_audit(["B01"]), scan, root)
+    stages = payload["stages"]
+    assert [s["id"] for s in stages] == ["b01"]
+    stage = stages[0]
+    assert stage["writes"] == ["tests/conftest.py", "tests/test_pkg_core.py"]
+    assert "from pkg.core import add, Thing" in stage["scaffold"]
+    assert "TODO(AI)" in stage["scaffold"]
+    assert stage["accept_cmd"] == autoplan.B01_ACCEPT
+
+
+def test_b01_skips_side_effecting_modules(tmp_path):
+    """导入即执行副作用的模块（脚本）不生成测试 —— 否则测试会真跑被测代码。"""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "script.py").write_text("print('hi')\n", encoding="utf-8")
+    scan = _scan({"script": "script.py"})
+
+    payload = autoplan.build(_audit(["B01"]), scan, root)
+    assert payload["stages"] == []
+    assert payload["skipped"][0]["rule"] == "B01"
+    assert "副作用" in payload["skipped"][0]["reason"]
