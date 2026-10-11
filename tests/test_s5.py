@@ -741,3 +741,106 @@ def test_switching_stage_resets_cell(tmp_path):
     # 切到 s2：应回到 A（若串台会直接停在 B）
     main(["s5", str(repo), "--plan", str(plan_path), "--out", str(out), "--stage-id", "s2"])
     assert cell_of(out) == "A"
+
+
+# ────────────── R6 护栏：type 白名单 + 留痕（2026-10-11） ──────────────
+
+
+def test_e_cell_rejects_non_whitelist_type(tmp_path):
+    """type 只允许在白名单里改；填 wip 之类 → 拦下。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out)
+    write_evidence(out)
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # → E
+    expected = json.loads((out / "state.json").read_text())["e_expected"][0]
+    for path in expected["paths"]:
+        git(["add", path], repo)
+    bad = expected["subject"].replace("feat(", "wip(", 1)
+    git(["commit", "-q", "-m", bad], repo)
+
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) != 0
+    assert cell_of(out) == "E"
+
+
+def test_e_cell_records_type_override(tmp_path):
+    """白名单内的 type 改动通过，并留痕到 state.e_type_override。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out)
+    write_evidence(out)
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # → E
+    expected = json.loads((out / "state.json").read_text())["e_expected"][0]
+    for path in expected["paths"]:
+        git(["add", path], repo)
+    git(["commit", "-q", "-m", expected["subject"].replace("feat(", "fix(", 1)], repo)
+
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) == 0
+    state = json.loads((out / "state.json").read_text())
+    assert state["e_type_override"] == [{"from": "feat", "to": "fix"}]
+
+
+# ────────────── 阶段 2：accept_cmd + upgrade 驱动循环 ──────────────
+
+
+def test_accept_cmd_flows_into_d_instruction(tmp_path):
+    """plan 带 accept_cmd 时，D 格无需 --test-cmd 即可渲染该命令（作用域=本次改动）。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path, accept_cmd="python -c \"print('OK')\"")
+    out = tmp_path / "out"
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # A
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # → B
+    (repo / "src/acme/core.py").write_text("VALUE = 2\n")
+
+    rc = main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # 不给 --test-cmd
+    assert rc == 0
+    assert cell_of(out) == "D"
+    assert "print('OK')" in (out / "steps" / "s1.D.md").read_text(encoding="utf-8")
+
+
+def test_upgrade_drives_and_marks_stages_done(tmp_path, capsys):
+    """阶段 2：反复运行 upgrade 即逐格推进；阶段完成后计入 done_stages。"""
+    repo = setup_repo(tmp_path)  # 已生成 scan.json
+    out = tmp_path / "out"
+    (out / "plan.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "stages": [
+                    {"id": "s1", "type": "ai", "writes": ["src/acme/core.py"],
+                     "forbidden_paths": [], "behavior_spec": "x"}
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    up = ["upgrade", str(repo), "--out", str(out)]
+    main(up)  # A
+    assert cell_of(out) == "A"
+    main(up)  # → B
+    assert cell_of(out) == "B"
+    (repo / "src/acme/core.py").write_text("VALUE = 2\n")
+    main([*up, "--test-cmd", "pytest -q"])  # → D
+    assert cell_of(out) == "D"
+    write_evidence(out)
+    main(up)  # → E
+    assert cell_of(out) == "E"
+
+    expected = json.loads((out / "state.json").read_text())["e_expected"][0]
+    for path in expected["paths"]:
+        git(["add", path], repo)
+    git(["commit", "-q", "-m", expected["subject"]], repo)
+
+    capsys.readouterr()
+    assert main(up) == 0  # E 通过 → 阶段完成
+    assert "阶段 s1 完成" in capsys.readouterr().out
+    state = json.loads((out / "state.json").read_text())
+    assert state["done_stages"] == ["s1"]
+
+    capsys.readouterr()
+    assert main(up) == 0  # 再运行 → 全部完成
+    assert "全部" in capsys.readouterr().out
