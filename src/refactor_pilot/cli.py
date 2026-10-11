@@ -11,7 +11,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, gitutil, model, outdir, recall, snapshot
+from . import __version__, gitutil, model, outdir, recall, s5, snapshot
 from .audit import collect_all as audit_all
 from .audit.report import render as render_audit
 from .audit.rules import Rules
@@ -70,6 +70,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_audit.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     p_audit.set_defaults(func=_cmd_audit)
+
+    p_s5 = sub.add_parser(
+        "s5", help="S5 最小切片：A 只读核对 / B 实现 / E 提交拆分（见 design-v2 第 14 节）"
+    )
+    p_s5.add_argument("path", help="目标项目路径（必须是 git 仓库）")
+    p_s5.add_argument("--plan", required=True, help="手写单阶段计划（JSON，见 14.2）")
+    p_s5.add_argument("--out", default=None, help="产物目录（默认在仓库之外，见 9.5）")
+    p_s5.add_argument(
+        "--cell",
+        choices=("a", "b", "e"),
+        default=None,
+        help="强制渲染指定格（向前跳会打 WARNING 并在 state.json 记 forced）",
+    )
+    p_s5.set_defaults(func=_cmd_s5)
 
     p_recall = sub.add_parser("recall", help="召回率自检（第 5 步）")
     p_recall.add_argument("--audit", required=True, help="audit.json 路径")
@@ -201,6 +215,53 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     else:
         _print_audit(payload, written)
     return EXIT_OK
+
+
+def _cmd_s5(args: argparse.Namespace) -> int:
+    target = Path(args.path).expanduser()
+    if not target.is_dir():
+        print(f"目标不是目录或不存在：{target}", file=sys.stderr)
+        return EXIT_UNSUPPORTED
+    if not s5.is_git_repo(target):
+        print(f"目标不是 git 仓库（E 格无法判定提交）：{target}", file=sys.stderr)
+        return EXIT_UNSUPPORTED
+
+    try:
+        stage = s5.plan.load(args.plan)
+    except s5.plan.PlanError as exc:
+        print(f"计划文件不合法：{exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    out_dir, inside_repo = outdir.resolve(target, args.out)
+    if inside_repo:
+        print(f"WARN 产物目录在目标仓库内：{out_dir}（见 9.5）", file=sys.stderr)
+
+    notes: list[str] = []
+    try:
+        result = s5.run(
+            target=target,
+            stage=stage,
+            out_dir=out_dir,
+            cell=args.cell,
+            warnings=notes,
+        )
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_USAGE
+    except s5.render.RenderError as exc:
+        print(f"渲染失败（拒绝输出指令块）：{exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    for line in result.warnings:
+        print(f"WARN {line}", file=sys.stderr)
+
+    print(f"refactor-pilot · s5 阶段 {result.stage} · {result.cell} 格")
+    print(f"  状态      : {result.status}")
+    print(f"  {result.message}")
+    if result.gate.get("reason"):
+        print(f"  检查点    : {result.gate['reason']}")
+    print(f"  产物目录  : {out_dir}")
+    return EXIT_OK if result.status != "blocked" else EXIT_ERROR
 
 
 def _cmd_recall(args: argparse.Namespace) -> int:
