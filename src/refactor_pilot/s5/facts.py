@@ -39,9 +39,16 @@ def dep_table(
     """
     rows: list[dict] = []
     seen: set[tuple[str, str]] = set()
+    tracked = tracked_paths(root)
     for rel in stage.writes:
-        tree = parse(root / rel)
+        path = root / rel
+        tree = parse(path)
         if tree is None:
+            # 新建文件（不在 git 跟踪里、磁盘上也还没有）→ 没有依赖可查，不产 missing 行。
+            # 判据是 git 事实，不靠 plan 作者声明（决策 6 / 2026-10-11）：
+            # 否则「补一个尚不存在的文件」这类任务会被自己的门禁卡死。
+            if not path.is_file() and rel not in tracked:
+                continue
             rows.append(
                 {
                     "target": rel,
@@ -227,6 +234,15 @@ def constraints_expected(root: Path, constraints_file: str | None) -> int:
 # ────────────────────────────── git 事实（只读） ──────────────────────────────
 
 
+def tracked_paths(source: Path) -> set[str]:
+    """`git ls-files` 的集合 —— 判断目标是不是"新建文件"的事实依据（决策 6）。
+
+    能从 git 事实推断的，就不该让 plan 作者声明一个可能写错的字段。
+    """
+    text = gitutil.out(["ls-files"], cwd=source)
+    return set(text.splitlines()) if text else set()
+
+
 def worktree_dirty_paths(source: Path) -> list[str]:
     """`git status --porcelain` 里的改动路径。空列表 = 干净。"""
     text = gitutil.out(["status", "--porcelain"], cwd=source)
@@ -274,22 +290,53 @@ EXIT_MARKER = re.compile(r"^RP_EXIT_CODE=(\d+)\s*$", re.MULTILINE)
 COLLECTED_MARKER = re.compile(r"collected (\d+) items?")
 COUNTED = re.compile(r"(\d+) (passed|failed|error|errors|xfailed|xpassed|skipped)")
 
+# 命令类型 → 需要什么证据。**判据来自命令本身，不靠人声明的参数**（决策 6 的应用：
+# 能从事实推断的就不该让人声明）。人只给命令，不额外声明期望 —— 这才是傻瓜式。
+CASES_TOOLS = ("pytest", "unittest", "py.test")
+LINT_TOOLS = ("ruff", "flake8", "pyflakes", "mypy", "pylint", "black", "isort")
 
-def parse_evidence(text: str | None) -> dict:
-    """读证据日志 → 判定三要素（design-v2 14.9）。
 
-    - `exit_code`：靠指令里的 `RP_EXIT_CODE=$?` 标记（`tee` 之后的管道退出码不可靠）
-    - `collected`：用例数，**0 要判失败**（B03 那条：静默选 0 个）
-    - `key_lines`：关键输出行（排除我们自己的标记行后的非空输出）
+def _cmd_kind(cmd: str | None) -> str:
+    """`cases`（测试运行器）/ `lint`（lint·类型·格式化）/ `output`（其它）。"""
+    lowered = (cmd or "").lower()
+    if any(token in lowered for token in CASES_TOOLS):
+        return "cases"
+    if any(token in lowered for token in LINT_TOOLS):
+        return "lint"
+    return "output"
+
+
+def evidence_requirement(cmd: str | None) -> str:
+    """给指令块用的一句话：这条命令需要什么样的证据。"""
+    kind = _cmd_kind(cmd)
+    if kind == "cases":
+        return (
+            "这是**测试命令**：要有用例数汇总行（`N passed` / `collected N items`）；"
+            "**收集到 0 个用例算失败**"
+        )
+    if kind == "lint":
+        return "这是 **lint / 类型 / 格式化命令**：**只要退出码为 0**（这类命令没有「用例数」概念）"
+    return "这是**普通命令**：退出码为 0，且**至少一行非空输出**"
+
+
+def parse_evidence(text: str | None, cmd: str | None = None) -> dict:
+    """读证据日志 → 按**命令类型**判该要哪几样（design-v2 14.9）。
+
+    - 退出码：靠指令里的 `RP_EXIT_CODE=$?` 标记（`tee` 之后的管道退出码不可靠），**一律要有**
+    - `cases`：还要用例数，**0 要判失败**（B03 那条：静默选 0 个）
+    - `lint` ：只看退出码
+    - `output`：要至少一行非空输出
 
     缺任何一项 → `problems` 非空 → D 格判未完成并重发指令。
     """
+    kind = _cmd_kind(cmd)
     problems: list[str] = []
     if not text or not text.strip():
         return {
             "exit_code": None,
             "collected": None,
             "key_lines": [],
+            "kind": kind,
             "problems": ["没有证据文件（或它是空的）—— 没有证据即判定未完成（4.2①）"],
         }
 
@@ -301,19 +348,22 @@ def parse_evidence(text: str | None) -> dict:
         problems.append(f"退出码 = {exit_code}（非 0）")
 
     collected = _collected(text)
-    if collected is None:
-        problems.append("日志里读不出用例数 —— 无法排除「静默选 0 个用例」")
-    elif collected == 0:
-        problems.append("收集到 0 个用例（静默零收集，等同没有测试）")
-
     key_lines = _key_lines(text)
-    if not key_lines:
+
+    if kind == "cases":
+        if collected is None:
+            problems.append("测试命令读不出用例数 —— 无法排除「静默选 0 个用例」")
+        elif collected == 0:
+            problems.append("收集到 0 个用例（静默零收集，等同没有测试）")
+    elif kind == "output" and not key_lines:
         problems.append("日志里没有任何输出行 —— 只有标记不算证据")
+    # kind == "lint"：只看退出码，不要求用例数、也不要求输出
 
     return {
         "exit_code": exit_code,
         "collected": collected,
         "key_lines": key_lines[:20],
+        "kind": kind,
         "problems": problems,
     }
 

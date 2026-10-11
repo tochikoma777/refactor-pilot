@@ -81,7 +81,7 @@ def run(
     if forced:
         state["forced"] = True
         notes.append(
-            f"WARNING 强制跳到 {requested} 格（当前 {state.get('current_cell')}）"
+            f"强制跳到 {requested} 格（当前 {state.get('current_cell')}）"
             "—— 绕过了前一格的检查点，state.json 已记 forced=true"
         )
 
@@ -126,7 +126,7 @@ def run(
                 stage=stage.id,
                 cell=requested,
                 status="done",
-                message="A → B → E 三格全部通过，本阶段完成",
+                message=f"{' → '.join(CELLS)} 全部通过，本阶段完成",
                 gate=gate,
                 warnings=notes,
             )
@@ -296,11 +296,12 @@ def _gate_b(root: Path, stage: Stage) -> dict:
 
 
 def _gate_d(state: dict, root: Path, stage: Stage, out_dir: Path) -> dict:
-    """D 格：读证据日志判三要素（exit code / 用例数 / 关键输出行）。"""
+    """D 格：读证据日志，按**命令类型**判该要的证据（退出码 / 用例数 / 输出行）。"""
     del root
     log = facts.evidence_path(out_dir, stage.id)
     text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else None
-    parsed = facts.parse_evidence(text)
+    parsed = facts.parse_evidence(text, cmd=state.get("test_cmd"))
+    kind = parsed["kind"]
 
     if parsed["problems"]:
         return {
@@ -313,12 +314,15 @@ def _gate_d(state: dict, root: Path, stage: Stage, out_dir: Path) -> dict:
             "evidence": str(log),
             **{key: parsed[key] for key in ("exit_code", "collected")},
         }
+    if kind == "cases":
+        detail = f"收集 {parsed['collected']} 个用例"
+    elif kind == "lint":
+        detail = "lint / 类型 / 格式化命令，退出码 0 即通过"
+    else:
+        detail = f"关键输出 {len(parsed['key_lines'])} 行"
     return {
         "passed": True,
-        "reason": (
-            f"D 格通过：退出码 0，收集 {parsed['collected']} 个用例，"
-            f"关键输出 {len(parsed['key_lines'])} 行"
-        ),
+        "reason": f"D 格通过：退出码 0，{detail}",
         "evidence": str(log),
         "exit_code": parsed["exit_code"],
         "collected": parsed["collected"],
@@ -418,7 +422,8 @@ def _context(
             "writes": list(stage.writes),
             "forbidden_paths": list(stage.forbidden_paths),
             "behavior_spec": stage.behavior_spec,
-            "evidence_log": f".upgrade/evidence/{stage.id}.log",
+            # 证据文件位置：与 D 格一致，落在**仓库外**（决策 #29 / 9.5）
+            "evidence_log": str(facts.evidence_path(out_dir, stage.id)),
         },
         "facts": {
             "dep_table": facts.dep_table(root, stage, modules, aliases),
@@ -426,6 +431,7 @@ def _context(
             "has_external": bool(facts.external_deps(root, stage, modules, aliases)),
             "test_cmd": effective_cmd or "",
             "test_cmd_is_suggested": _test_cmd_is_suggested(scan, effective_cmd),
+            "evidence_requirement": facts.evidence_requirement(effective_cmd),
             "evidence_path": str(facts.evidence_path(out_dir, stage.id)),
             "contract_snapshot": facts.contract_snapshot(root, stage, modules),
             "constraints_expected": facts.constraints_expected(root, constraints_file),
