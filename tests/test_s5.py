@@ -802,7 +802,25 @@ def test_accept_cmd_flows_into_d_instruction(tmp_path):
 
 def test_upgrade_drives_and_marks_stages_done(tmp_path, capsys):
     """阶段 2：反复运行 upgrade 即逐格推进；阶段完成后计入 done_stages。"""
-    repo = setup_repo(tmp_path)  # 已生成 scan.json
+    # 给一个"什么都不缺"的仓库，重规划时才不会又冒出新的缺失型 gap（阶段 3 的重规划）
+    repo = setup_repo(
+        tmp_path,
+        {
+            "src/acme/core.py": "VALUE = 1\n",
+            "pyproject.toml": (
+                "[project]\nname='demo'\nversion='0.1.0'\n"
+                "[tool.ruff]\nline-length=100\n"
+                "[tool.pytest.ini_options]\ntestpaths=['tests']\n"
+            ),
+            ".gitignore": (
+                "__pycache__/\n*.py[cod]\n.venv/\nbuild/\ndist/\n*.egg-info/\n"
+                ".mypy_cache/\n.ruff_cache/\n.pytest_cache/\n.tox/\n"
+            ),
+            "CODEBUDDY.md": "# 约束\n",
+            ".github/workflows/ci.yml": "name: ci\non:\n  push:\njobs:\n  t:\n    runs-on: u\n",
+            "tests/test_core.py": "def test_v():\n    assert True\n",
+        },
+    )
     out = tmp_path / "out"
     (out / "plan.json").write_text(
         json.dumps(
@@ -844,3 +862,76 @@ def test_upgrade_drives_and_marks_stages_done(tmp_path, capsys):
     capsys.readouterr()
     assert main(up) == 0  # 再运行 → 全部完成
     assert "全部" in capsys.readouterr().out
+
+
+# ────────────── 阶段 3 复盘的 4 条修复（2026-10-11） ──────────────
+
+
+def test_upgrade_done_report_lists_skipped_handoff(tmp_path, capsys):
+    """④ 完成报告必须列出"需 AI/人工处理"的 skipped（交接，不是丢弃）。"""
+    from refactor_pilot import cli
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "plan.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "stages": [],
+             "skipped": [{"rule": "B01", "reason": "无测试：交人工"}]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    capsys.readouterr()
+    assert cli._print_upgrade_done(out, ["c01"]) == 0
+    text = capsys.readouterr().out
+    assert "需 AI/人工处理" in text and "B01" in text
+
+
+def test_upgrade_replan_cap_reports_pending(tmp_path, capsys):
+    """① 重规划封顶：做完后重规划仍有 gap 且轮数用尽 → 报"未决，需人工"。"""
+    repo = setup_repo(tmp_path)  # 只有 README → 仍会报 C01/C02/C04/C06
+    out = tmp_path / "out"
+    (out / "plan.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "stages": [
+                {"id": "c01", "type": "ai", "writes": ["pyproject.toml"],
+                 "forbidden_paths": [], "behavior_spec": "x"}], "skipped": []},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (out / "state.json").write_text(
+        json.dumps({"schema_version": 1, "current_stage": "c01", "current_cell": "done",
+                    "done_stages": ["c01"], "replan_rounds": 3}),
+        encoding="utf-8",
+    )
+
+    capsys.readouterr()
+    rc = main(["upgrade", str(repo), "--out", str(out)])
+    text = capsys.readouterr().out
+    assert rc != 0
+    assert "最大重规划轮数" in text and "需人工" in text
+
+
+def test_a_cell_allows_non_python_target(tmp_path):
+    """非 Python 目标（如 .gitignore）没有 import 依赖可查 → A 格不产 missing 行、不拦。"""
+    repo = setup_repo(tmp_path, {"src/acme/core.py": "VALUE=1\n", ".gitignore": "__pycache__/\n"})
+    plan = write_plan(tmp_path, writes=[".gitignore"])
+    out = tmp_path / "out"
+
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # 渲染 A
+    text = (out / "steps" / "s1.A.md").read_text(encoding="utf-8")
+    assert "（文件不存在或语法错误）" not in text
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) == 0  # A→B
+    assert cell_of(out) == "B"
+
+
+def test_untracked_new_directory_is_in_scope(tmp_path):
+    """B 格：新建整个目录时 git 折叠成 `?? dir/`，不得误判越界（-uall 修复）。"""
+    from refactor_pilot.s5 import facts
+
+    repo = setup_repo(tmp_path)
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / ".github" / "workflows" / "ci.yml").write_text("name: ci\n", encoding="utf-8")
+
+    assert facts.worktree_dirty_paths(repo) == [".github/workflows/ci.yml"]

@@ -518,3 +518,20 @@ def test_g01_git_dir_threshold(tmp_path, monkeypatch):
 
     _, payload = audit(repo, out=tmp_path / "out")
     assert "G01" in rules_of(payload)
+
+
+def test_g03_exempts_tests_and_examples(tmp_path):
+    """G03 豁免：测试夹具 / 示例文件里的假 key 不算泄露（2026-10-11 自审计抓到的误报）。"""
+    repo = make_repo(
+        tmp_path / "repo",
+        {
+            "tests/test_secrets.py": 'API_KEY = "AKIA1234567890ABCDEF"\n',
+            "examples/demo.py": 'token = "ghp_abcdefghijklmnop"\n',
+            "src/conf.py": 'api_key = "AKIA1234567890ABCDEF"\n',
+        },
+    )
+    _, payload = audit(repo, out=tmp_path / "out")
+    files = {f["file"] for f in payload["findings"] if f["rule"] == "G03"}
+    assert "src/conf.py" in files           # 真源码里的明文 key → 仍报
+    assert "tests/test_secrets.py" not in files
+    assert "examples/demo.py" not in files
