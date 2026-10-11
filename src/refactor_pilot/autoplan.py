@@ -64,8 +64,16 @@ MANUAL_RULES: dict[str, str] = {
 }
 
 
+# 不自动规划的**通用**原因（除 MANUAL_RULES 里的专门说明外）
+DEFAULT_SKIP_REASON = "未自动规划：不在工程化补课映射表内，需 AI/人工判断"
+
+
 def build(audit: dict) -> dict:
-    """audit payload → plan payload（多阶段）。"""
+    """audit payload → plan payload（多阶段）。
+
+    **铁律：每条 finding 三选一 —— 进 stages / 进 skipped（带原因）/ 不可能静默。**
+    （找不到映射就登记为 skipped，绝不静默丢弃。）
+    """
     findings = audit.get("findings") or []
     stages: list[dict] = []
     skipped: list[dict] = []
@@ -73,8 +81,10 @@ def build(audit: dict) -> dict:
 
     for finding in findings:
         rule = finding.get("rule")
-        if rule in BLUEPRINTS and rule not in seen:
-            seen.add(rule)
+        if not rule or rule in seen:
+            continue
+        seen.add(rule)
+        if rule in BLUEPRINTS:
             writes, spec, accept = BLUEPRINTS[rule]
             stage = {
                 "id": rule.lower(),
@@ -86,8 +96,8 @@ def build(audit: dict) -> dict:
             if accept:
                 stage["accept_cmd"] = accept
             stages.append(stage)
-        elif rule in MANUAL_RULES and rule not in {item["rule"] for item in skipped}:
-            skipped.append({"rule": rule, "reason": MANUAL_RULES[rule]})
+        else:
+            skipped.append({"rule": rule, "reason": MANUAL_RULES.get(rule, DEFAULT_SKIP_REASON)})
 
     return {
         "schema_version": SCHEMA_VERSION,
