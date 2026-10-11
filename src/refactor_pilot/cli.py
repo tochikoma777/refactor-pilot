@@ -367,6 +367,9 @@ def _emit_s5(result: s5.Result, out_dir: Path) -> None:
     print(f"  产物目录  : {out_dir}")
 
 
+REPLAN_MAX = 3  # 跨阶段副作用的重规划轮数上限（改 A 触发 B 会无限循环，必须封顶）
+
+
 def _cmd_upgrade(args: argparse.Namespace) -> int:
     """阶段 2：单命令驱动循环 —— 反复运行本命令即逐格推进到全部阶段完成。
 
@@ -391,22 +394,41 @@ def _cmd_upgrade(args: argparse.Namespace) -> int:
         if rc != EXIT_OK:
             return rc
 
-    try:
-        stages = s5.plan.load_stages(plan_path)
-    except s5.plan.PlanError as exc:
-        print(f"计划文件不合法：{exc}", file=sys.stderr)
-        return EXIT_USAGE
+    stages = _load_stages_tolerant(plan_path)
+    if not stages:
+        return _print_upgrade_done(out_dir, [])
 
-    done = list(_read_state(out_dir).get("done_stages") or [])
+    state = _read_state(out_dir)
+    done = list(state.get("done_stages") or [])
     remaining = [stage for stage in stages if stage.id not in done]
+
     if not remaining:
-        print(f"refactor-pilot · upgrade · 全部 {len(stages)} 个阶段已完成 ✅")
-        for stage in stages:
-            print(f"    ✓ {stage.id} → {', '.join(stage.writes)}")
-        return EXIT_OK
+        # 全部完成 → 也许**跨阶段副作用**产生了新 gap（如加 ruff.toml → G05 可选层命中）。
+        # 因此重规划一次；轮数封顶，否则"改 A 触发 B、改 B 触发 C"会无限循环。
+        rounds = int(state.get("replan_rounds", 0))
+        rc, _, _ = _build_plan_files(target, args, out_dir)
+        if rc != EXIT_OK:
+            return rc
+        remaining = [s for s in _load_stages_tolerant(plan_path) if s.id not in done]
+        if remaining and rounds < REPLAN_MAX:
+            state["replan_rounds"] = rounds + 1
+            outdir.write_json(Path(out_dir), "state.json", state)
+            print(
+                f"重规划第 {rounds + 1}/{REPLAN_MAX} 轮：发现新缺失型 gap "
+                f"{[s.id for s in remaining]}（跨阶段副作用）"
+            )
+        elif remaining:
+            print(
+                f"refactor-pilot · upgrade · 已达最大重规划轮数 {REPLAN_MAX}，"
+                f"仍有 {len(remaining)} 个未决，需人工：{[s.id for s in remaining]}"
+            )
+            return EXIT_ERROR
+        else:
+            return _print_upgrade_done(out_dir, done)
 
     stage = remaining[0]
-    print(f"refactor-pilot · upgrade（已完成 {len(done)}/{len(stages)}，当前阶段 {stage.id}）")
+    total = len(done) + len(remaining)  # 已关 + 待办（重规划后 plan 只含新 gap，别拿它当分母）
+    print(f"refactor-pilot · upgrade（已完成 {len(done)}/{total}，当前阶段 {stage.id}）")
     notes: list[str] = []
     try:
         result = s5.run(
@@ -432,8 +454,40 @@ def _cmd_upgrade(args: argparse.Namespace) -> int:
             done.append(stage.id)
         state["done_stages"] = done
         outdir.write_json(Path(out_dir), "state.json", state)
-        print(f"  → 阶段 {stage.id} 完成（{len(done)}/{len(stages)}）；再运行一次进入下一阶段")
+        print(f"  → 阶段 {stage.id} 完成（{len(done)}/{total}）；再运行一次进入下一阶段")
     return EXIT_OK if result.status != "blocked" else EXIT_ERROR
+
+
+def _load_stages_tolerant(plan_path: Path) -> list[s5.plan.Stage]:
+    """驱动循环专用：**空计划**（无 finding）视作"没有 gap"，不当作错误。"""
+    if not Path(plan_path).is_file():
+        return []
+    try:
+        return s5.plan.load_stages(plan_path)
+    except s5.plan.PlanError:
+        return []
+
+
+def _print_upgrade_done(out_dir: Path, done: list[str]) -> int:
+    """全部阶段完成后：列出已关 + **列出跳过项（需 AI/人工处理，交接而非丢弃）**。"""
+    if done:
+        print(f"refactor-pilot · upgrade · 全部 {len(done)} 个阶段已完成 ✅")
+        for stage_id in done:
+            print(f"    ✓ {stage_id}")
+    else:
+        print("refactor-pilot · upgrade · 没有需要自动处理的缺失型 finding")
+    skipped: list[dict] = []
+    plan_path = Path(out_dir) / "plan.json"
+    if plan_path.is_file():
+        try:
+            skipped = json.loads(plan_path.read_text(encoding="utf-8")).get("skipped") or []
+        except (OSError, json.JSONDecodeError):
+            skipped = []
+    if skipped:
+        print("  以下 finding 本工具**不自动处理，需 AI/人工处理**（交接，不是丢弃）：")
+        for item in skipped:
+            print(f"    ! {item['rule']}：{item['reason']}")
+    return EXIT_OK
 
 
 def _read_state(out_dir: Path) -> dict:
