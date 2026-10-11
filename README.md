@@ -2,15 +2,21 @@
 
 refactor-pilot 是一个**工程化补课工具**。它能可靠发现工程化缺失；它能提示配置矛盾；它**不能**验证语义正确性——后者只有开启对拍（Q6）或人工深度审计才能覆盖。
 
-## 首版范围
+## 当前能力
 
-只做 **S1 扫描 + S2 审计 + recall 召回率自检**，全部**只读**。
+- **只读分析**：**S1 扫描 + S2 审计 + recall 召回率自检**
+- **改造切片（S5，实验）**：`A 开工核对 → B 实现 → D 实跑验收 → E 提交拆分`。
+  工具只**生成**命令与指令块，**不执行**被测代码 / git 写操作（"指挥官模式"），
+  由 AI/人执行、工具下次运行读证据判定；产物默认落在**仓库之外**
+
+**当前方向与验收口径**见 [`docs/process.md`](docs/process.md) 顶部的"原始需求 + 三门"。
 
 ```
 refactor-pilot scan  <path> [--ref REF] [--out DIR] [--snapshot {worktree,archive}]
                             [--exec-probe {on,off}] [--json] [-v]
 refactor-pilot audit <path> [--ref REF] [--out DIR] [--rules FILE] [--json]
 refactor-pilot recall --audit FILE --baseline FILE [--json] [--detail]
+refactor-pilot s5    <path> --plan FILE [--out DIR] [--cell {a,b,d,e}] [--test-cmd CMD]
 ```
 
 退出码：`0` 成功（**发现问题不算错**）／`1` 运行时错误／`2` 用法错误／`3` 目标不支持。
