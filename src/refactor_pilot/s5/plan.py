@@ -1,10 +1,12 @@
-"""S5 切片的输入：手写单阶段计划（替代 S4 规划器）。
+"""S5 切片的输入：计划（手写单阶段，或 `plan` 子命令自动生成的多阶段）。
 
-两条硬约束（design-v2 14.2）：
+三条硬约束（design-v2 14.2）：
 
 1. `schema_version` 必填（首版 = 1）；缺字段**报错并指明缺哪个** —— 不猜、不默认
 2. `writes[]` 是**相对 target 根**的路径，**不支持 glob** —— glob 会让 B 格的
    越界判定变模糊（`src/**/*.py` 到底算不算越界？判定一含糊，检查点就失去意义）
+3. 形状有两种：`{"stage": {...}}`（单阶段，手写）或 `{"stages": [{...}, ...]}`
+   （多阶段，`plan` 子命令生成）；`forbidden_paths` 允许为空（writes 范围本身已约束）
 """
 
 from __future__ import annotations
@@ -33,16 +35,18 @@ class Stage:
 
 
 def load(path: str | os.PathLike[str]) -> Stage:
-    file = Path(path)
-    try:
-        raw = json.loads(file.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise PlanError(f"计划文件不存在：{file}") from exc
-    except json.JSONDecodeError as exc:
-        raise PlanError(f"计划文件不是合法 JSON：{exc}") from exc
+    """读**单个**阶段（手写 plan 的常规入口）。多阶段计划请用 `load_stages`。"""
+    stages = load_stages(path)
+    if len(stages) != 1:
+        raise PlanError(
+            f"计划里有 {len(stages)} 个阶段 —— 单阶段入口只接受 1 个，请用 load_stages()"
+        )
+    return stages[0]
 
-    if not isinstance(raw, dict):
-        raise PlanError("计划文件的顶层必须是对象")
+
+def load_stages(path: str | os.PathLike[str]) -> list[Stage]:
+    """读计划里的**全部**阶段（`stage` 或 `stages` 两种形状都支持）。"""
+    raw = _read(path)
     if "schema_version" not in raw:
         raise PlanError("计划缺少字段 `schema_version`（首版 = 1）")
     if raw["schema_version"] != SCHEMA_VERSION:
@@ -50,21 +54,47 @@ def load(path: str | os.PathLike[str]) -> Stage:
             f"计划 schema_version = {raw['schema_version']}，本工具只认 {SCHEMA_VERSION}"
         )
 
-    stage = raw.get("stage")
+    items = raw.get("stages")
+    if items is None:
+        single = raw.get("stage")
+        items = [single] if isinstance(single, dict) else None
+    if not isinstance(items, list) or not items:
+        raise PlanError("计划缺少 `stage`（对象）或 `stages`（非空数组）")
+
+    return [_to_stage(item, index) for index, item in enumerate(items)]
+
+
+def _read(path: str | os.PathLike[str]) -> dict:
+    file = Path(path)
+    try:
+        raw = json.loads(file.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise PlanError(f"计划文件不存在：{file}") from exc
+    except json.JSONDecodeError as exc:
+        raise PlanError(f"计划文件不是合法 JSON：{exc}") from exc
+    if not isinstance(raw, dict):
+        raise PlanError("计划文件的顶层必须是对象")
+    return raw
+
+
+def _to_stage(stage: object, index: int) -> Stage:
+    where = f"stages[{index}]"
     if not isinstance(stage, dict):
-        raise PlanError("计划缺少字段 `stage`（对象）")
+        raise PlanError(f"{where} 必须是对象")
 
     missing = [name for name in REQUIRED_STAGE_FIELDS if name not in stage]
     if missing:
-        raise PlanError("stage 缺少字段：" + ", ".join(f"`{name}`" for name in missing))
+        raise PlanError(f"{where} 缺少字段：" + ", ".join(f"`{name}`" for name in missing))
 
-    writes = _as_str_tuple(stage["writes"], "stage.writes")
-    forbidden = _as_str_tuple(stage["forbidden_paths"], "stage.forbidden_paths")
+    writes = _as_str_tuple(stage["writes"], f"{where}.writes", allow_empty=False)
+    forbidden = _as_str_tuple(
+        stage["forbidden_paths"], f"{where}.forbidden_paths", allow_empty=True
+    )
     behavior = stage["behavior_spec"]
     if not isinstance(behavior, str) or not behavior.strip():
-        raise PlanError("stage.behavior_spec 必须是非空字符串")
+        raise PlanError(f"{where}.behavior_spec 必须是非空字符串")
 
-    for group, values in (("stage.writes", writes), ("stage.forbidden_paths", forbidden)):
+    for group, values in ((f"{where}.writes", writes), (f"{where}.forbidden_paths", forbidden)):
         for value in values:
             _validate_relative(group, value)
 
@@ -77,9 +107,9 @@ def load(path: str | os.PathLike[str]) -> Stage:
     )
 
 
-def _as_str_tuple(value: object, field: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value:
-        raise PlanError(f"{field} 必须是非空数组")
+def _as_str_tuple(value: object, field: str, *, allow_empty: bool) -> tuple[str, ...]:
+    if not isinstance(value, list) or (not value and not allow_empty):
+        raise PlanError(f"{field} 必须是{'可空' if allow_empty else '非空'}数组")
     for item in value:
         if not isinstance(item, str) or not item.strip():
             raise PlanError(f"{field} 的元素必须是非空字符串")

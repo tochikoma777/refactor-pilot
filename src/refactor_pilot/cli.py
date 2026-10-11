@@ -1,4 +1,4 @@
-"""命令行入口：scan / audit / recall（9.2）。
+"""命令行入口：scan / audit / recall / plan / s5（9.2）。
 
 退出码：0 成功（发现问题不算错）／1 运行时错误／2 用法错误／3 目标不支持。
 默认人读输出，--json 输出机器可读，两者内容同源（12.10）。
@@ -11,7 +11,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, gitutil, model, outdir, recall, s5, snapshot
+from . import __version__, autoplan, gitutil, model, outdir, recall, s5, snapshot
 from .audit import collect_all as audit_all
 from .audit.report import render as render_audit
 from .audit.rules import Rules
@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="只读重构审计工具：S1 扫描 + S2 审计 + 召回率自检",
     )
     parser.add_argument("--version", action="version", version=f"refactor-pilot {__version__}")
-    sub = parser.add_subparsers(dest="command", metavar="{scan,audit,recall}")
+    sub = parser.add_subparsers(dest="command", metavar="{scan,audit,recall,plan,s5}")
 
     p_scan = sub.add_parser("scan", help="S1 扫描：只采集事实，不做判定")
     p_scan.add_argument("path", help="目标项目路径")
@@ -71,6 +71,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_audit.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     p_audit.set_defaults(func=_cmd_audit)
 
+    p_plan = sub.add_parser(
+        "plan",
+        help="阶段 1：把 audit 的缺失型 finding 自动转成 plan（S4-lite，见 design-v2 14.13）",
+    )
+    p_plan.add_argument("path", help="目标项目路径")
+    p_plan.add_argument("--ref", default=None, help="审计该 git ref 的快照")
+    p_plan.add_argument("--out", default=None, help="产物目录（默认在仓库之外，见 9.5）")
+    p_plan.add_argument(
+        "--snapshot", choices=("worktree", "archive"), default="worktree", help="快照方式（12.7）"
+    )
+    p_plan.add_argument("--rules", default=None, help="规则配置文件（.toml / .json）")
+    p_plan.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    p_plan.set_defaults(func=_cmd_plan)
+
     p_s5 = sub.add_parser(
         "s5", help="S5 最小切片：A 只读核对 / B 实现 / E 提交拆分（见 design-v2 第 14 节）"
     )
@@ -81,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--test-cmd",
         default=None,
         help="D 格的验收命令（扫描探不到时必须由人给出，见 14.9）",
+    )
+    p_s5.add_argument(
+        "--stage-id",
+        default=None,
+        help="多阶段计划里选择要推进的阶段（缺省：接着 state.json 里的阶段，否则第一个）",
     )
     p_s5.add_argument(
         "--cell",
@@ -222,6 +241,87 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_plan(args: argparse.Namespace) -> int:
+    target = Path(args.path).expanduser()
+    if not target.is_dir():
+        print(f"目标不是目录或不存在：{target}", file=sys.stderr)
+        return EXIT_UNSUPPORTED
+    if args.ref is not None and not gitutil.is_repo(target):
+        print(f"目标不是 git 仓库，无法解析 --ref {args.ref}：{target}", file=sys.stderr)
+        return EXIT_UNSUPPORTED
+
+    kind = args.snapshot if args.ref is not None else snapshot.WORKDIR
+    out_dir, inside_repo = outdir.resolve(target, args.out)
+    if inside_repo:
+        print(f"WARN 产物目录在目标仓库内：{out_dir}（默认应在仓库之外，见 9.5）", file=sys.stderr)
+
+    rules = Rules.default()
+    try:
+        rules.load_overrides(args.rules)
+    except (OSError, ValueError) as exc:
+        print(f"规则配置文件读不了：{exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    try:
+        with snapshot.create(target, args.ref, kind) as snap:
+            scan_payload = _build_scan(target, args, snap)
+            written_scan = outdir.write_json(out_dir, "scan.json", scan_payload)
+            audit_payload = model.new_audit_payload(
+                path=str(target.resolve()),
+                ref=snap.ref,
+                snapshot_kind=snap.kind,
+                resolved_sha=snap.resolved_sha,
+                scan_path=str(written_scan),
+            )
+            audit_payload.update(
+                audit_all(root=snap.root, source=target, scan=scan_payload, rules=rules)
+            )
+            outdir.write_json(out_dir, "audit.json", audit_payload)
+            plan_payload = autoplan.build(audit_payload)
+            written = outdir.write_json(out_dir, "plan.json", plan_payload)
+    except RuntimeError as exc:
+        print(f"快照失败：{exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if args.json:
+        print(json.dumps(plan_payload, ensure_ascii=False, indent=2))
+    else:
+        _print_plan(plan_payload, written)
+    return EXIT_OK
+
+
+def _print_plan(payload: dict, written: Path) -> None:
+    stages = payload["stages"]
+    print("refactor-pilot · plan（阶段 1：audit finding → 阶段）")
+    print(f"  阶段数    : {len(stages)}")
+    for stage in stages:
+        print(f"    - {stage['id']} → {', '.join(stage['writes'])}")
+    for item in payload.get("skipped", []):
+        print(f"    （跳过 {item['rule']}：{item['reason']}）")
+    print(f"  产出      : {written}")
+
+
+def _pick_stage(stages: list[s5.plan.Stage], out_dir: Path, stage_id: str | None) -> s5.plan.Stage:
+    """多阶段计划里选要推进的阶段：显式 `--stage-id` > state.json 里的 > 第一个。"""
+    if stage_id:
+        for stage in stages:
+            if stage.id == stage_id:
+                return stage
+        options = ", ".join(stage.id for stage in stages)
+        raise s5.plan.PlanError(f"--stage-id={stage_id} 不在计划里（可选：{options}）")
+
+    state_path = Path(out_dir) / "state.json"
+    if state_path.is_file():
+        try:
+            current = json.loads(state_path.read_text(encoding="utf-8")).get("current_stage")
+        except (OSError, json.JSONDecodeError):
+            current = None
+        for stage in stages:
+            if stage.id == current:
+                return stage
+    return stages[0]
+
+
 def _cmd_s5(args: argparse.Namespace) -> int:
     target = Path(args.path).expanduser()
     if not target.is_dir():
@@ -231,15 +331,15 @@ def _cmd_s5(args: argparse.Namespace) -> int:
         print(f"目标不是 git 仓库（E 格无法判定提交）：{target}", file=sys.stderr)
         return EXIT_UNSUPPORTED
 
-    try:
-        stage = s5.plan.load(args.plan)
-    except s5.plan.PlanError as exc:
-        print(f"计划文件不合法：{exc}", file=sys.stderr)
-        return EXIT_USAGE
-
     out_dir, inside_repo = outdir.resolve(target, args.out)
     if inside_repo:
         print(f"WARN 产物目录在目标仓库内：{out_dir}（见 9.5）", file=sys.stderr)
+
+    try:
+        stage = _pick_stage(s5.plan.load_stages(args.plan), out_dir, args.stage_id)
+    except s5.plan.PlanError as exc:
+        print(f"计划文件不合法：{exc}", file=sys.stderr)
+        return EXIT_USAGE
 
     notes: list[str] = []
     try:
