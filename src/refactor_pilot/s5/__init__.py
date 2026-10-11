@@ -212,7 +212,7 @@ def _gate_for(
     if requested == "A":
         return _gate_a(state, root, stage, modules, aliases)
     if requested == "B":
-        return _gate_b(root, stage)
+        return _gate_b(state, root, stage)
     if requested == "D":
         return _gate_d(state, root, stage, out_dir)
     return _gate_e(state, root)
@@ -248,7 +248,8 @@ def _gate_a(state: dict, root: Path, stage: Stage, modules: dict, aliases: dict)
     return {"passed": True, "reason": "A 格通过：依赖闭合、且零改动", "stubs": [], "changed": []}
 
 
-def _gate_b(root: Path, stage: Stage) -> dict:
+def _gate_b(state: dict, root: Path, stage: Stage) -> dict:
+    """B 格：改动范围 + 创建类目标的"已创建且非空"（D-06 门禁模型）。"""
     changed = facts.worktree_dirty_paths(root)
     writes = set(stage.writes)
     out_of_scope = [path for path in changed if path not in writes]
@@ -272,6 +273,27 @@ def _gate_b(root: Path, stage: Stage) -> dict:
             + "\n  ".join(out_of_scope)
             + "\n→ 要么退回这批改动，要么把它写进 plan 的 writes 再来。",
             "out_of_scope": out_of_scope,
+            "forbidden_touched": [],
+            "changed": changed,
+        }
+    # D-06：创建类目标（生成本阶段前不在 git 跟踪里）必须"已创建且非空"。
+    # 空文件会让后续 B/D 检查点形同虚设 —— 建了个空壳不算完成。
+    create = [rel for rel in (state.get("create_targets") or []) if rel in writes]
+    missing = [rel for rel in create if not (root / rel).is_file()]
+    if missing:
+        return {
+            "passed": False,
+            "reason": "创建类目标还不存在（本阶段应当新建）：\n  " + "\n  ".join(missing),
+            "out_of_scope": [],
+            "forbidden_touched": [],
+            "changed": changed,
+        }
+    empty = [rel for rel in create if (root / rel).stat().st_size == 0]
+    if empty:
+        return {
+            "passed": False,
+            "reason": "创建了空文件（D-06：新建的产物不能是空壳）：\n  " + "\n  ".join(empty),
+            "out_of_scope": [],
             "forbidden_touched": [],
             "changed": changed,
         }
@@ -442,14 +464,10 @@ def _context(
     }
 
 
-COMMIT_TYPE_PREFIXES = (("docs/", "docs"), ("tests/", "test"))
-CONFIG_SUFFIXES = (".toml", ".cfg", ".ini", ".yml", ".yaml")
-
-
 def _commit_plan(changed: list[str], stage: Stage) -> list[dict]:
     """按路径分类 commit_type，逐条生成 `git add <path>`（R5）。
 
-    ⚠️ 简化（如实标注）：分类只看路径前缀，不看改动语义 —— 语义分类是 S4 的活。
+    ⚠️ 简化（如实标注）：分类只看路径，不看改动语义 —— 语义分类是 S4 的活。
     """
     if not changed:
         return []
@@ -481,14 +499,26 @@ def _test_cmd_is_suggested(scan: dict, test_cmd: str | None) -> bool:
 
 
 def _commit_type(path: str) -> str:
-    for prefix, commit_type in COMMIT_TYPE_PREFIXES:
-        if path.startswith(prefix):
-            return commit_type
-    if Path(path).name.startswith("test_"):
-        return "test"
-    if path.endswith(CONFIG_SUFFIXES) or path.startswith("."):
+    """D-06 的 commit_type 推断表（按路径，不看改动语义）。
+
+    | 路径 | type |
+    | ---- | ---- |
+    | `pyproject.toml` / `requirements*.txt` | `build` |
+    | `.github/workflows/*` | `ci` |
+    | `.gitignore` / `.pre-commit-config*` | `chore` |
+    | `test_*.py` | `test` |
+    | 其它 | `chore` |
+    """
+    name = Path(path).name
+    if name == "pyproject.toml" or (name.startswith("requirements") and name.endswith(".txt")):
+        return "build"
+    if path.startswith(".github/workflows/"):
+        return "ci"
+    if name == ".gitignore" or name.startswith(".pre-commit-config"):
         return "chore"
-    return "feat"
+    if name.startswith("test_"):
+        return "test"
+    return "chore"
 
 
 def _summary(paths: list[str]) -> str:
@@ -499,6 +529,12 @@ def _record_baseline(state: dict, cell: str, root: Path, context: dict) -> None:
     if cell == "A":
         sample = dict(list(facts.fingerprint(root).items())[:FINGERPRINT_LIMIT])
         state["a_fingerprint"] = sample
+        # D-06：生成本阶段时**不在 git 跟踪里**的 writes → 创建类目标，
+        # B 格据此判"已创建且非空"
+        tracked = facts.tracked_paths(root)
+        state["create_targets"] = [
+            rel for rel in context["stage"]["writes"] if rel not in tracked
+        ]
     if cell == "E":
         state["e_rev_count"] = facts.rev_count(root)
         state["e_expected"] = [
