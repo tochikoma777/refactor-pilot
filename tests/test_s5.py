@@ -41,10 +41,25 @@ def write_plan(tmp_path: Path, **stage_overrides) -> Path:
     return path
 
 
-def run_s5(repo: Path, plan: Path, tmp_path: Path, *extra: str) -> tuple[int, str]:
-    out = tmp_path / "out"
-    rc = main(["s5", str(repo), "--plan", str(plan), "--out", str(out), *extra])
-    return rc, out.as_posix()
+def advance(repo: Path, plan: Path, out: Path, *extra: str) -> int:
+    """跑一次 S5（一次运行最多推进一格）。"""
+    return main(["s5", str(repo), "--plan", str(plan), "--out", str(out), *extra])
+
+
+def write_evidence(out: Path, body: str = "3 passed in 0.02s", exit_code: int = 0,
+                   stage: str = "s1") -> Path:
+    """模拟"AI 执行了 D 格命令"：把证据日志写到产物目录（仓库外）。"""
+    log = out / "evidence" / f"{stage}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(f"$ pytest -q\n{body}\nRP_EXIT_CODE={exit_code}\n", encoding="utf-8")
+    return log
+
+
+def cell_of(out: Path) -> str | None:
+    import json as _json
+
+    path = out / "state.json"
+    return _json.loads(path.read_text(encoding="utf-8"))["current_cell"] if path.is_file() else None
 
 
 # ────────────────────────────── 14.6 主流程 ──────────────────────────────
@@ -67,11 +82,16 @@ def test_three_cells_advance_one_step_at_a_time(tmp_path):
     assert json.loads((out / "state.json").read_text())["current_cell"] == "B"
     assert (out / "steps" / "s1.B.md").is_file()
 
-    # 实现（改 writes 内的文件）
+    # 实现（改 writes 内的文件）→ B 通过 → 推进到 D
     (repo / "src/acme/core.py").write_text("VALUE = 2\n\n\ndef configure(x):\n    return x\n")
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out),
+                 "--test-cmd", "pytest -q"]) == 0
+    assert cell_of(out) == "D"
+    assert (out / "steps" / "s1.D.md").is_file()
 
-    rc = main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
-    assert rc == 0
+    # AI 执行 D 格命令（测试里直接写证据日志）→ D 通过 → 推进到 E
+    write_evidence(out)
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) == 0
     state = json.loads((out / "state.json").read_text())
     assert state["current_cell"] == "E"
     assert (out / "steps" / "s1.E.md").is_file()
@@ -165,7 +185,10 @@ def test_e_cell_blocks_on_subject_mismatch(tmp_path):
     main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
 
     (repo / "src/acme/core.py").write_text("VALUE = 2\n")
-    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # 到 E
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out),
+          "--test-cmd", "pytest -q"])  # B 通过 → D
+    write_evidence(out)
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # D 通过 → E
 
     git(["add", "src/acme/core.py"], repo)
     git(["commit", "-q", "-m", "feat: 我自己写的提交信息"], repo)
@@ -184,6 +207,9 @@ def test_e_cell_passes_with_exact_subject(tmp_path):
     main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
 
     (repo / "src/acme/core.py").write_text("VALUE = 3\n")
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out),
+          "--test-cmd", "pytest -q"])
+    write_evidence(out)
     main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
 
     state = json.loads((out / "state.json").read_text())
@@ -268,3 +294,190 @@ def test_s5_does_not_touch_target_sources(tmp_path):
     main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
     assert fsutil.fingerprint(repo) == before
     assert gitutil.status_porcelain(repo) == ""
+
+
+# ────────────────────────────── D 格（实跑验收 R4） ──────────────────────────────
+
+
+def to_d(repo: Path, plan: Path, out: Path, *, change: bool = True) -> None:
+    """走到 D 格：A → B（改 writes 内文件）→ D。"""
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # A
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # → B
+    if change:
+        (repo / "src/acme/core.py").write_text("VALUE = 7\n")
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out),
+          "--test-cmd", "pytest -q"])  # → D
+    assert cell_of(out) == "D"
+
+
+def test_d_cell_blocks_without_test_cmd(tmp_path):
+    """无可用 test_cmd → 不许静默跳过：标 needs_manual_acceptance 并阻塞（14.9 第 3 条）。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # A
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # → B
+    (repo / "src/acme/core.py").write_text("VALUE = 8\n")
+
+    # B 通过后要进 D，但没给命令 → 阻塞，且**不渲染 D 块**
+    rc = main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
+    assert rc != 0
+    state = json.loads((out / "state.json").read_text())
+    assert state["needs_manual_acceptance"] is True
+    assert not (out / "steps" / "s1.D.md").exists()
+
+
+def test_d_cell_blocks_when_evidence_missing(tmp_path):
+    """没有证据文件 = 未完成，并重发 D 格指令（4.2①）。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out)
+
+    rc = main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
+    assert rc != 0
+    assert cell_of(out) == "D"
+    assert "未完成" in (out / "steps" / "s1.D.md").read_text(encoding="utf-8")
+
+
+def test_d_cell_blocks_on_nonzero_exit(tmp_path):
+    """退出码非 0 → 判未完成。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out)
+    write_evidence(out, body="1 failed, 2 passed in 0.03s", exit_code=1)
+
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) != 0
+    assert cell_of(out) == "D"
+
+
+def test_d_cell_blocks_on_zero_collected(tmp_path):
+    """静默零收集 → 判未完成（与 B03 同一条道理）。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out)
+    write_evidence(out, body="no tests ran in 0.01s")
+
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) != 0
+    assert cell_of(out) == "D"
+
+
+def test_d_cell_blocks_when_log_has_no_output(tmp_path):
+    """只有标记、没有输出行 → 不算证据。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out)
+    log = out / "evidence" / "s1.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("RP_EXIT_CODE=0\n", encoding="utf-8")
+
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) != 0
+    assert cell_of(out) == "D"
+
+
+def test_d_cell_passes_with_complete_evidence(tmp_path):
+    """反向：三要素齐 → D 通过并推进。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out)
+    write_evidence(out, body="collected 3 items\n3 passed in 0.03s")
+
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) == 0
+    assert cell_of(out) == "E"
+
+
+# ────────────────── 每个检查点都配"故意让它失败"的用例（14.10） ──────────────────
+
+
+def test_a_cell_blocks_when_sources_drift(tmp_path):
+    """A 格零改动检查点：渲染后源码被改动 → 拦下（否则只测通过测不出失效）。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # 渲染 A、记指纹
+
+    (repo / "src/acme/core.py").write_text("VALUE = 999\n")  # A 格期间不该动源码
+
+    rc = main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
+    assert rc != 0
+    assert cell_of(out) == "A"
+
+
+def test_b_cell_blocks_on_forbidden_path(tmp_path):
+    """B 格禁改路径检查点：改到 forbidden_paths → 拦下。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path, forbidden_paths=["src/acme/schema.py"])
+    out = tmp_path / "out"
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # → B
+
+    (repo / "src/acme/schema.py").write_text("SCHEMA = 2\n")  # 禁改
+
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) != 0
+    assert cell_of(out) == "B"
+
+
+def test_e_cell_blocks_on_wrong_commit_count(tmp_path):
+    """E 格提交数检查点：少提交一次 → 拦下。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out)
+    write_evidence(out)
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # → E
+    assert cell_of(out) == "E"
+
+    # 什么都不提交，直接再跑
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) != 0
+    assert cell_of(out) == "E"
+
+
+def test_e_cell_blocks_when_worktree_dirty(tmp_path):
+    """E 格"工作树必须干净"检查点。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    to_d(repo, plan, out)
+    write_evidence(out)
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])  # → E
+
+    git(["add", "-A"], repo)
+    git(["commit", "-q", "-m", "先提交了"], repo)
+    (repo / "src/acme/core.py").write_text("VALUE = 11\n")  # 又弄脏
+
+    assert main(["s5", str(repo), "--plan", str(plan), "--out", str(out)]) != 0
+    assert cell_of(out) == "E"
+
+
+def test_rerun_current_cell_does_not_warn(tmp_path, capsys):
+    """重跑当前格不警告（只有向前跳才警告，14.5）。"""
+    repo = setup_repo(tmp_path)
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
+    capsys.readouterr()
+
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out), "--cell", "a"])
+    assert "WARNING" not in capsys.readouterr().err
+    assert json.loads((out / "state.json").read_text())["forced"] is False
+
+
+def test_a_instruction_lists_external_deps_explicitly(tmp_path):
+    """R1 降级必须显式列在指令块里（14.9 第 5 条），不能只躺在日志。"""
+    repo = setup_repo(
+        tmp_path,
+        {"src/acme/core.py": "import torch\nimport numpy\n\nVALUE = 1\n"},
+    )
+    plan = write_plan(tmp_path)
+    out = tmp_path / "out"
+    main(["s5", str(repo), "--plan", str(plan), "--out", str(out)])
+
+    text = (out / "steps" / "s1.A.md").read_text(encoding="utf-8")
+    assert "R1 在本阶段**降级**" in text
+    assert "torch" in text and "numpy" in text
+    assert "external" in text
