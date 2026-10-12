@@ -71,31 +71,62 @@ MANUAL_RULES: dict[str, str] = {}
 
 DEFAULT_SKIP_REASON = "未自动规划：不在工程化补课映射表内，需 AI/人工判断"
 
+# 按规则给的**交接提示**（不下手改代码，但把"正确做法"讲清楚，别让 AI 只会硬加断言）
+SKIP_HINTS: dict[str, str] = {
+    "B02": (
+        "这些文件顶层有副作用（导入即执行），正确处理通常是**移出包**或**改名为非 test_ 前缀**，"
+        "而不是只加断言。"
+    ),
+}
+
 B01_ACCEPT = "python -m pytest -q tests"
+
+
+def _skip_entry(rule: str, reason: str, items: list[dict]) -> dict:
+    """跳过项：按**规则**去重显示，但带 `count` 与**全部** `files` —— 记账到 finding 粒度。"""
+    files: list[str] = []
+    for item in items:
+        path = item.get("file")
+        if path and path not in files:
+            files.append(path)
+    entry = {"rule": rule, "reason": reason, "count": len(items), "files": files}
+    hint = SKIP_HINTS.get(rule)
+    if hint:
+        entry["hint"] = hint
+    return entry
 
 
 def build(audit: dict, scan: dict | None = None, root: str | Path | None = None) -> dict:
     """audit payload（+ scan / root）→ plan payload（多阶段）。
 
     **铁律：每条 finding 三选一 —— 进 stages / 进 skipped（带原因）/ 不可能静默。**
+    skipped 按**规则**去重显示，但每条带 `count` + 全部 `files`，使
+    `sum(skipped.count) + stages 覆盖的 finding 数 == finding 总数` 恒成立。
     """
     findings = audit.get("findings") or []
-    stages: list[dict] = []
-    skipped: list[dict] = []
-    seen: set[str] = set()
 
+    by_rule: dict[str, list[dict]] = {}
+    order: list[str] = []
     for finding in findings:
         rule = finding.get("rule")
-        if not rule or rule in seen:
+        if not rule:
             continue
-        seen.add(rule)
+        if rule not in by_rule:
+            by_rule[rule] = []
+            order.append(rule)
+        by_rule[rule].append(finding)
 
+    stages: list[dict] = []
+    skipped: list[dict] = []
+
+    for rule in order:
+        items = by_rule[rule]
         if rule == "B01":
             stage, reason = _b01_stage(scan, root)
             if stage:
                 stages.append(stage)
             else:
-                skipped.append({"rule": rule, "reason": reason})
+                skipped.append(_skip_entry(rule, reason, items))
         elif rule in BLUEPRINTS:
             writes, spec, accept = BLUEPRINTS[rule]
             stage = {
@@ -109,7 +140,9 @@ def build(audit: dict, scan: dict | None = None, root: str | Path | None = None)
                 stage["accept_cmd"] = accept
             stages.append(stage)
         else:
-            skipped.append({"rule": rule, "reason": MANUAL_RULES.get(rule, DEFAULT_SKIP_REASON)})
+            skipped.append(
+                _skip_entry(rule, MANUAL_RULES.get(rule, DEFAULT_SKIP_REASON), items)
+            )
 
     return {
         "schema_version": SCHEMA_VERSION,

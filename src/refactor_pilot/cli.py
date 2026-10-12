@@ -291,7 +291,9 @@ def _print_plan(payload: dict, written: Path) -> None:
     for stage in stages:
         print(f"    - {stage['id']} → {', '.join(stage['writes'])}")
     for item in payload.get("skipped", []):
-        print(f"    （跳过 {item['rule']}：{item['reason']}）")
+        count = item.get("count")
+        suffix = f"（{count} 处）" if count else ""
+        print(f"    （跳过 {item['rule']}{suffix}：{item['reason']}）")
     print(f"  产出      : {written}")
 
 
@@ -486,7 +488,13 @@ def _print_upgrade_done(out_dir: Path, done: list[str]) -> int:
     if skipped:
         print("  以下 finding 本工具**不自动处理，需 AI/人工处理**（交接，不是丢弃）：")
         for item in skipped:
-            print(f"    ! {item['rule']}：{item['reason']}")
+            count = item.get("count")
+            head = item["rule"] + (f"（{count} 处）" if count else "")
+            print(f"    ! {head}：{item['reason']}")
+            for path in item.get("files") or []:
+                print(f"        - {path}")
+            if item.get("hint"):
+                print(f"        提示：{item['hint']}")
     return EXIT_OK
 
 
