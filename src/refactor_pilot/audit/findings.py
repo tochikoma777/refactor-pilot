@@ -64,6 +64,7 @@ class FindingFactory:
         line: int,
         evidence: str,
         severity: str | None = None,
+        confidence: str | None = None,
         suggestion: str | None = None,
         merged: list[dict] | None = None,
     ) -> dict | None:
@@ -82,7 +83,8 @@ class FindingFactory:
             "rule": rule_id,
             "class": self.rules.klass(rule_id),
             "severity": severity or self.rules.severity(rule_id),
-            "confidence": "low" if no_evidence else self.rules.confidence(rule_id),
+            # 降级一律 low；否则用调用方显式给的（如 G05 的非 git fallback = medium），再退回规则表
+            "confidence": "low" if no_evidence else (confidence or self.rules.confidence(rule_id)),
             "file": file,
             "line": line,
             "evidence": evidence.strip()[:200],

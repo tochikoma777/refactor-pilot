@@ -14,12 +14,29 @@ from pathlib import Path
 
 from .. import fsutil, gitutil
 from .findings import FindingFactory
-from .rules import MAJOR, MINOR
+from .rules import HIGH, MAJOR, MEDIUM, MINOR
 
 GIT_DIR_BYTES = 20 * 1024 * 1024
 LARGE_FILE_BYTES = 1_000_000
 
 GITIGNORE_CORE = ("__pycache__/", "*.py[cod]", "build/", "dist/", "*.egg-info/", ".venv/")
+
+# G05 核心 pattern → **代表路径**，交给 `git check-ignore` 实测是否真被忽略。
+# 两条硬要求：
+#  1. 目录 pattern 用"目录内的文件"当代表：`git check-ignore -q .venv` 对 `.venv/`
+#     这类目录 pattern 会误判"未忽略"（它按文件判），只有 `.venv/x` 才判得对
+#  2. 代表路径**不能被别的核心 pattern 顺带匹配**，否则会张冠李戴 ——
+#     例如 `__pycache__/x.pyc` 会被 `*.py[cod]` 匹配，从而把"漏了 __pycache__/"
+#     误判成"已忽略"。故 `__pycache__/` 用无扩展名的 `__pycache__/x`。
+# 这样 `.gitignore` 写 `*.py[codz]`（超集）或 `.venv`（无斜杠，语义等价）也不再误报。
+GITIGNORE_PROBE = {
+    "__pycache__/": "__pycache__/x",
+    "*.py[cod]": "x.pyc",
+    "build/": "build/x",
+    "dist/": "dist/x",
+    "*.egg-info/": "x.egg-info/PKG-INFO",
+    ".venv/": ".venv/x",
+}
 GITIGNORE_OPTIONAL = {
     ".mypy_cache/": ("mypy.ini", ".mypy.ini"),
     ".ruff_cache/": ("ruff.toml", ".ruff.toml"),
@@ -94,12 +111,12 @@ def check(
             if finding:
                 findings.append(finding)
 
-    findings += _gitignore(root, scan, factory)
+    findings += _gitignore(root, source, scan, factory)
     findings += _secrets(root, tracked_files, factory)
     return findings
 
 
-def _gitignore(root: Path, scan: dict, factory: FindingFactory) -> list[dict]:
+def _gitignore(root: Path, source: Path, scan: dict, factory: FindingFactory) -> list[dict]:
     path = root / ".gitignore"
     if not path.is_file():
         finding = factory.make(
@@ -111,11 +128,16 @@ def _gitignore(root: Path, scan: dict, factory: FindingFactory) -> list[dict]:
     patterns = {line.strip() for line in lines}
     findings: list[dict] = []
 
-    missing_core = [p for p in GITIGNORE_CORE if p not in patterns]
+    missing_core, used_git = _missing_core(source, patterns)
     if missing_core:
+        detail = ", ".join(f"{p}（代表路径 `{rep}`）" for p, rep in missing_core)
+        note = "" if used_git else "；**非 git 目标**，按字符串匹配（未经 check-ignore 实测）"
         finding = factory.make(
             "G05", file=".gitignore", line=0,
-            evidence="核心 pattern 未忽略：" + ", ".join(missing_core), severity=MAJOR,
+            evidence="核心 pattern 未忽略：" + detail + note,
+            severity=MAJOR,
+            # 实测过的用规则默认（high）；只能串匹配时如实降为 medium（12.6 精神）
+            confidence=HIGH if used_git else MEDIUM,
         )
         if finding:
             findings.append(finding)
@@ -144,6 +166,42 @@ def _gitignore(root: Path, scan: dict, factory: FindingFactory) -> list[dict]:
             if finding:
                 findings.append(finding)
     return findings
+
+
+def _missing_core(source: Path, patterns: set[str]) -> tuple[list[tuple[str, str]], bool]:
+    """哪些核心 pattern 没被忽略：优先用 `git check-ignore` 实测代表路径。
+
+    返回 (缺失的 [(pattern, 代表路径)], 是否用了 git 实测)。
+    git 不可用 / 非仓库 / 调用异常 → 该 pattern 退回字符串匹配（used_git 保持 False）。
+    """
+    missing: list[tuple[str, str]] = []
+    used_git = False
+    for pattern in GITIGNORE_CORE:
+        rep = GITIGNORE_PROBE[pattern]
+        ignored = _ignored_by_git(source, rep)
+        if ignored is None:
+            if pattern not in patterns:
+                missing.append((pattern, rep))
+        else:
+            used_git = True
+            if not ignored:
+                missing.append((pattern, rep))
+    return missing, used_git
+
+
+def _ignored_by_git(source: Path, rel: str) -> bool | None:
+    """`git check-ignore -q <rel>`：0=已忽略 / 1=未忽略 / 其它或非仓库=None（走 fallback）。"""
+    if not gitutil.available() or not gitutil.is_repo(source):
+        return None
+    try:
+        cp = gitutil.run(["check-ignore", "-q", "--", rel], cwd=source)
+    except gitutil.GitError:
+        return None
+    if cp.returncode == 0:
+        return True
+    if cp.returncode == 1:
+        return False
+    return None
 
 
 def _secrets(root: Path, tracked_files: list[str], factory: FindingFactory) -> list[dict]:
