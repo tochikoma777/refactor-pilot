@@ -32,7 +32,7 @@ source .venv/bin/activate          # 所有命令都在仓库内 .venv 里跑（
 
 ruff check .                       # lint：line-length 100，规则 E/F/W/I
 mypy                               # 类型检查：只看 src/，strict=false
-pytest -q                          # 全量测试（当前 119 passed）
+pytest -q                          # 全量测试（当前 123 passed）
 
 pytest tests/test_scan.py                      # 单个测试文件
 pytest tests/test_scan.py::test_toolchain_all_null_with_reason_when_no_config  # 单个用例
@@ -105,7 +105,7 @@ argparse → snapshot.create() → scan.collect_all() → audit.collect_all()
 - `s5/render.py` 渲染指令块（模板里有**未解析占位符就拒绝输出**，6.2）
 - **工具不执行被测代码、也不执行 git 写操作**：只生成命令/指令块 → AI/人执行 →
   工具下次运行**读证据**判定（14.9）。`--exec-probe` 默认 off。
-- `upgrade`（cli.py:373）是单命令驱动循环：反复运行即逐阶段推进；全 `done` 后还会
+- `upgrade`（cli.py:375）是单命令驱动循环：反复运行即逐阶段推进；全 `done` 后还会
   **重规划**一次（跨阶段副作用，封顶 3 轮）；每条 finding 三选一：进 stages / 进 skipped / 不静默。
 
 ### 产物与状态文件
