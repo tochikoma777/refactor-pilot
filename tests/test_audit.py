@@ -262,6 +262,54 @@ def test_g05_suppresses_g07(tmp_path):
     assert any(m["rule"] == "G07" for m in g05["merged"])
 
 
+def test_g05_superset_patterns_not_reported(tmp_path):
+    """G05 走语义覆盖（`git check-ignore`）：`*.py[codz]`（超集）与 `.venv`（无斜杠）不该报。
+
+    这正是 nanogpt-plus 的误报场景 —— 写法不是规范串，但功能上早已忽略。
+    """
+    repo = make_repo(
+        tmp_path / "repo",
+        {
+            "src/mod.py": "x = 1\n",
+            ".gitignore": "__pycache__/\n*.py[codz]\nbuild/\ndist/\n*.egg-info/\n.venv\n",
+        },
+    )
+    _, payload = audit(repo, out=tmp_path / "out")
+    assert "G05" not in rules_of(payload), "写法非规范串但语义已覆盖，不该报"
+
+
+def test_g05_reports_missing_core_with_probe_path(tmp_path):
+    """G05 真缺核心 pattern → 报，且证据里带**代表路径**（可复核：`git check-ignore <rep>`）。"""
+    repo = make_repo(
+        tmp_path / "repo",
+        {
+            "src/mod.py": "x = 1\n",
+            ".gitignore": "*.py[cod]\n",  # 只忽略字节码，其余核心 pattern 都缺
+        },
+    )
+    _, payload = audit(repo, out=tmp_path / "out")
+    g05 = [f for f in payload["findings"] if f["rule"] == "G05"]
+    assert g05, "核心 pattern 真缺却没报"
+    evidence = g05[0]["evidence"]
+    assert "代表路径" in evidence
+    assert "__pycache__/x" in evidence and ".venv/x" in evidence
+    assert g05[0]["confidence"] == "high", "经 git 实测，置信度不该降"
+
+
+def test_g05_non_git_fallback_marks_medium(tmp_path):
+    """G05 非 git 目标：退回字符串匹配，但置信度如实降为 **medium**（12.6 精神）。"""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    (plain / ".gitignore").write_text("*.py[cod]\n", encoding="utf-8")
+
+    rc, payload = audit(plain, out=tmp_path / "out")
+    assert rc == 0
+    g05 = [f for f in payload["findings"] if f["rule"] == "G05"]
+    assert g05, "非 git 目标上真缺核心 pattern 也该报"
+    assert g05[0]["confidence"] == "medium", "未经 check-ignore 实测，置信度必须降为 medium"
+
+
 def test_b01_suppresses_b02_b03_b04(tmp_path):
     """B01（无测试）命中时，B02/B03/B04 不该再逐条出现。"""
     repo = make_repo(tmp_path / "repo", {"src/mod.py": "x = 1\n", "pyproject.toml": PYPROJECT})

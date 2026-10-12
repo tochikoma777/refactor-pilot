@@ -64,6 +64,28 @@ def test_every_finding_is_stage_or_skipped():
     assert not (staged & skipped)              # 不重复归属
     assert all(item["reason"] for item in payload["skipped"])  # 跳过必须带原因
 
+    # 记账到 finding 粒度：skipped 的 count 之和 + stages 覆盖数 == 总数
+    staged_count = sum(1 for r in rules if r in staged)
+    skipped_count = sum(item["count"] for item in payload["skipped"])
+    assert staged_count + skipped_count == len(rules)
+
+
+def test_finding_granularity_accounting():
+    """skipped 按规则去重显示，但带 count + 全部 files + hint（finding 粒度记账）。"""
+    rules = ["B02"] * 6 + ["G05", "G05", "C04", "C06"]
+    findings = [{"rule": r, "file": f"f{i}.txt"} for i, r in enumerate(rules)]
+    payload = autoplan.build({"findings": findings})
+
+    staged_rules = {s["id"].upper() for s in payload["stages"]}
+    staged_count = sum(1 for f in findings if f["rule"] in staged_rules)
+    skipped_count = sum(item["count"] for item in payload["skipped"])
+    assert staged_count + skipped_count == len(findings), "有 finding 没记账（被静默吞掉）"
+
+    b02 = next(i for i in payload["skipped"] if i["rule"] == "B02")
+    assert b02["count"] == 6
+    assert len(b02["files"]) == 6
+    assert "副作用" in b02["hint"]
+
 
 def test_yaml_validator_candidates_shape():
     """③ 候选清单：探测到的解析器命令要带文件路径（让人做选择题）。"""
