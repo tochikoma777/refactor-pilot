@@ -69,7 +69,11 @@ refactor-pilot upgrade <path> [--ref REF] [--out DIR] [--test-cmd CMD] [--cell {
 
 ```bash
 source .venv/bin/activate
-pytest            # 含只读专项测试：扫完 git status 干净 + 文件指纹不变
+pip install -e .          # 装出 refactor-pilot 命令行（上面用法里的入口）
+pytest                    # 含只读专项测试：扫完 git status 干净 + 文件指纹不变
 ruff check .
 mypy
 ```
+
+不装也行（`pytest` 靠 `conftest.py` 把 `src/` 加进 `sys.path`，照样跑得起来），但那样
+**没有 `refactor-pilot` 命令**。想不装直接用：`PYTHONPATH=src python -m refactor_pilot ...`。
